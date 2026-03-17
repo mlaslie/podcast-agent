@@ -1,0 +1,7 @@
+adk deploy agent_engine \
+  --project=YOUR_PROJECT_ID \
+  --region=us-central1 \
+  --display_name="Podcast Agent" \
+  --description="An agent that generates podcasts" \
+  --trace_to_cloud \
+  root_agent

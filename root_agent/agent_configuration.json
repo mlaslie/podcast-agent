@@ -1,0 +1,43 @@
+{
+    "_comment": "Podcast Agent Configuration v0.1 — edit this file to change models, voices, and output settings.",
+
+    "vertex_ai": {
+        "project":  "YOUR_PROJECT_ID",
+        "location": "global"
+    },
+
+    "models": {
+        "orchestrator":     "gemini-3.1-flash-lite-preview",
+        "source_collector": "gemini-3.1-flash-lite-preview",
+        "search_agent":     "gemini-3.1-flash-lite-preview",
+        "script_writer":    "gemini-3-flash-preview",
+        "audio_producer":   "gemini-3.1-flash-lite-preview",
+        "tts":              "gemini-2.5-flash-preview-tts"
+    },
+
+    "hosts": {
+        "host_1": {
+            "name":        "Alex",
+            "voice":       "Umbriel",
+            "description": "energetic and curious, often asks clarifying questions"
+        },
+        "host_2": {
+            "name":        "Jordan",
+            "voice":       "Charon",
+            "description": "knowledgeable and measured, provides depth and context"
+        }
+    },
+
+    "audio": {
+        "sample_rate":        24000,
+        "channels":           1,
+        "sample_width":       2,
+        "tts_max_chars":      100000,
+        "chunk_target_words": 600
+    },
+
+    "output": {
+        "local_output_dir":   "output",
+        "gcs_output_bucket":  "gs://YOUR_DEFAULT_OUTPUT_BUCKET"
+    }
+}
