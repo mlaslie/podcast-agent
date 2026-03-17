@@ -21,14 +21,17 @@ User Input → Source Collector → Script Writer → Audio Producer → WAV Fil
 ## Project Structure
 
 ```
-├── __init__.py
-├── agent.py                      # Root orchestrator
-├── agent_configuration.json      # Models, voices, and output settings
-├── requirements.txt
-└── sub_agents/
-    ├── source_collector_agent.py
-    ├── script_writer_agent.py
-    └── audio_producer_agent.py
+└── root_agent
+    ├── __init.py__
+    ├── agent_configuration.json
+    ├── agent.py
+    ├── .env
+    ├── requirements.txt
+    └── sub_agents
+        ├── audio_producer_agent.py
+        ├── script_writer_agent.py
+        └── source_collector_agent.py
+
 ```
 
 ---
