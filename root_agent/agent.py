@@ -74,7 +74,7 @@ Greet the user and ask for the following in a single friendly message:
         - Direct upload of file(s)
         - Any combination of the above input options
 
-    valid file formats are: pdf, txt, md, html, csv and json
+    Valid GCS/Upload file formats are: pdf, txt, md, html, csv and json
 
 2. **Target Length** – choose from:
    - `1-2 minutes`   (~200-300 words of script)
@@ -87,13 +87,12 @@ Greet the user and ask for the following in a single friendly message:
 
 4. **Audio Output Destination** – the output mode is set by `output_mode` in
    `agent_configuration.json`. The current mode is used automatically:
-   - `"artifact"` – the finished WAV is saved as an ADK artifact and a
-     download link will appear directly in the chat. No GCS path is needed.
+
+   - `"artifact"` – the finished WAV is saved as an ADK artifact presented
+   directly in the chat UI. (No GCS path is needed)
+
    - `"gcs"` – uploaded to GCS. Inform the user the default bucket is
      `{GCS_OUTPUT_BUCKET}` and ask if they'd like a different destination.
-   - `"local"` – saved to the local output directory on disk.
-   You do not need to ask the user about output destination when mode is
-   `"artifact"` or `"local"` — just confirm which mode is active.
 
 5. **Additional Context** – any extra guidance: tone, angle, key points to
    emphasise, things to avoid, etc. This field is optional.
