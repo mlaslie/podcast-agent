@@ -1,6 +1,8 @@
 # audio_producer_agent.py
 # Converts a formatted two-host podcast script into a WAV audio file using
-# Gemini TTS. Supports writing output locally or to Google Cloud Storage.
+# Gemini TTS via the Cloud Text-to-Speech client with MultiSpeakerMarkup
+# structured turns. Supports writing output locally, to GCS, or as an ADK
+# artifact.
 
 import io
 import json
@@ -12,10 +14,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from google import genai
 from google.adk.agents import Agent
 from google.adk.tools import ToolContext
-from google.genai import types
+from google.cloud import texttospeech
+from google.genai import types  # still used for artifact Blob
 
 logger = logging.getLogger(__name__)
 
@@ -32,20 +34,8 @@ with open(_CONFIG_PATH) as _f:
 # Model Configuration
 # ---------------------------------------------------------------------------
 
-TTS_MODEL            = _CFG["models"]["tts"]
+TTS_MODEL            = _CFG["models"]["tts"]          # e.g. "gemini-2.5-flash-preview-tts"
 AUDIO_PRODUCER_MODEL = _CFG["models"]["audio_producer"]
-
-# ---------------------------------------------------------------------------
-# Vertex AI Client
-# ---------------------------------------------------------------------------
-
-_VERTEX = _CFG["vertex_ai"]
-
-client = genai.Client(
-    vertexai=True,
-    project=_VERTEX["project"],
-    location=_VERTEX["location"],
-)
 
 # ---------------------------------------------------------------------------
 # Podcast Speaker Setup
@@ -54,19 +44,16 @@ client = genai.Client(
 HOST_1 = _CFG["hosts"]["host_1"]
 HOST_2 = _CFG["hosts"]["host_2"]
 
-ALEX_DESCRIPTION = f"""
-## {HOST_1['name']} — The Curious Host
-Personality: {HOST_1['description']}
-Voice: Warm, upbeat, accessible. Often the one to introduce topics and ask
-"so what does that actually mean for our listeners?" questions.
-"""
+# FLATTENED DESCRIPTIONS: Removed markdown and line breaks to prevent TTS read-aloud
+ALEX_DESCRIPTION = (
+    f"{HOST_1['name']} is the curious host. Personality: {HOST_1['description']}. "
+    "Voice: Warm, upbeat, and accessible. Often introduces topics and asks clarifying questions."
+)
 
-JORDAN_DESCRIPTION = f"""
-## {HOST_2['name']} — The Expert Host
-Personality: {HOST_2['description']}
-Voice: Calm authority with occasional dry wit. Brings the receipts — data,
-history, nuance. Sometimes pauses before answering to think it through.
-"""
+JORDAN_DESCRIPTION = (
+    f"{HOST_2['name']} is the expert host. Personality: {HOST_2['description']}. "
+    "Voice: Calm authority with occasional dry wit. Brings data and history, and sometimes pauses to think."
+)
 
 # ---------------------------------------------------------------------------
 # Audio Output Configuration
@@ -78,140 +65,153 @@ _OUTPUT = _CFG["output"]
 AUDIO_SAMPLE_RATE  = _AUDIO["sample_rate"]
 AUDIO_CHANNELS     = _AUDIO["channels"]
 AUDIO_SAMPLE_WIDTH = _AUDIO["sample_width"]
-TTS_MAX_CHARS      = _AUDIO["tts_max_chars"]
 CHUNK_TARGET_WORDS = _AUDIO["chunk_target_words"]
 
 OUTPUT_DIR        = _OUTPUT["local_output_dir"]
 GCS_OUTPUT_BUCKET = _OUTPUT["gcs_output_bucket"]
 OUTPUT_MODE       = _OUTPUT.get("output_mode", "gcs")  # "artifact" | "gcs" | "local"
 
+# Cloud TTS model name used in VoiceSelectionParams.
+# The TTS_MODEL value from config is a Gemini model string (e.g.
+# "gemini-2.5-flash-preview-tts"); the Cloud TTS API expects the equivalent
+# short form (e.g. "gemini-2.5-flash-tts").  We strip the "-preview" infix so
+# both config formats work transparently.
+_TTS_API_MODEL = TTS_MODEL.replace("-preview-tts", "-tts")
 
 # ---------------------------------------------------------------------------
-# TTS Prompt Builder (Director's Notes style)
+# Cloud TTS Client
 # ---------------------------------------------------------------------------
 
-def _build_tts_prompt(
-    script_chunk: str,
+tts_client = texttospeech.TextToSpeechClient()
+
+# ---------------------------------------------------------------------------
+# Director's Notes Builder
+# ---------------------------------------------------------------------------
+
+def _build_director_notes(
     podcast_title: str,
     style_guidance: Optional[str],
     chunk_index: int,
     total_chunks: int,
 ) -> str:
     """
-    Builds a rich Director's Notes TTS prompt per the Gemini prompting guide.
-    This is the key to getting natural, expressive speech output.
+    Builds the Director's Notes prompt that is passed as the `prompt` field
+    of SynthesisInput. Formatted as a dense paragraph without Markdown to
+    prevent the Gemini-TTS model from mistakenly reading the text aloud.
     """
     continuation_note = ""
     if total_chunks > 1:
         if chunk_index == 0:
-            continuation_note = "This is the opening segment of the podcast."
+            continuation_note = "This is the opening segment."
         elif chunk_index == total_chunks - 1:
-            continuation_note = "This is the closing segment of the podcast."
+            continuation_note = "This is the closing segment."
         else:
-            continuation_note = (
-                f"This is segment {chunk_index + 1} of {total_chunks} "
-                "of an ongoing podcast conversation. The hosts are mid-discussion."
+            continuation_note = f"This is segment {chunk_index + 1} of {total_chunks}. The hosts are mid-discussion."
+
+    extra_style = f"Additional style guidance: {style_guidance}. " if style_guidance else ""
+
+    # FLATTENED PROMPT: A single conversational block prevents "script reading" behavior
+    return (
+        f"System Instructions (Do not read aloud): You are producing a podcast episode titled '{podcast_title}'. "
+        f"The scene is a modern podcast studio where two knowledgeable hosts are having a focused but relaxed conversation. "
+        f"{continuation_note} "
+        f"{ALEX_DESCRIPTION} "
+        f"{JORDAN_DESCRIPTION} "
+        f"Delivery rules: Both hosts must sound completely natural and conversational. "
+        f"Perform inline markers: [pause] as a brief thinking pause, [laughs] as a light laugh, and [sighs] as an exhale. "
+        f"Use natural hesitations and contractions. The pace should be 130 to 150 words per minute. "
+        f"{extra_style}"
+        f"CRITICAL: These are backend director notes. Absolutely no part of this text should be spoken aloud."
+    )
+
+# ---------------------------------------------------------------------------
+# Script Parser — text → structured Turn list
+# ---------------------------------------------------------------------------
+
+def _parse_script_to_turns(
+    script: str,
+) -> list[texttospeech.MultiSpeakerMarkup.Turn]:
+    """
+    Parses a formatted script into a list of MultiSpeakerMarkup.Turn objects.
+
+    Expects lines in the form:
+        Alex: Some dialogue here...
+        Jordan: Response here...
+
+    Consecutive lines by the same speaker are merged into a single turn.
+    Inline stage markers ([pause], [laughs], [sighs]) are preserved in the
+    text — the TTS model interprets them via the director's notes prompt.
+    """
+    host_names = {HOST_1["name"], HOST_2["name"]}
+    # Match "SpeakerName: dialogue" — speaker name may contain spaces
+    turn_pattern = re.compile(
+        r"^(" + "|".join(re.escape(n) for n in host_names) + r"):\s*(.+)",
+        re.MULTILINE,
+    )
+
+    turns: list[texttospeech.MultiSpeakerMarkup.Turn] =[]
+    for match in turn_pattern.finditer(script):
+        speaker = match.group(1)
+        text    = match.group(2).strip()
+        if not text:
+            continue
+        # Merge into previous turn if the same speaker continues
+        if turns and turns[-1].speaker == speaker:
+            turns[-1] = texttospeech.MultiSpeakerMarkup.Turn(
+                speaker=speaker,
+                text=turns[-1].text + " " + text,
+            )
+        else:
+            turns.append(
+                texttospeech.MultiSpeakerMarkup.Turn(speaker=speaker, text=text)
             )
 
-    extra_style = ""
-    if style_guidance:
-        extra_style = f"\nAdditional Style Notes: {style_guidance}\n"
+    if not turns:
+        raise ValueError(
+            "No speaker turns found in script. "
+            f"Expected lines starting with '{HOST_1['name']}:' or '{HOST_2['name']}:'."
+        )
 
-    prompt = f"""# AUDIO PROFILE: Two-Host Podcast
-## "{podcast_title}"
-
-## THE SCENE: Modern Podcast Studio
-Two knowledgeable hosts — {HOST_1['name']} and {HOST_2['name']} — are seated
-across from each other in a warmly-lit, acoustically-treated studio. The
-"ON AIR" light glows red. There's genuine warmth and chemistry between them.
-They have prepared notes but speak as if in natural conversation. The energy
-is focused but relaxed — like two smart friends who happen to be recording.
-{continuation_note}
-
-{ALEX_DESCRIPTION}
-{JORDAN_DESCRIPTION}
-
-### DIRECTOR'S NOTES
-
-Style:
-- Both hosts sound completely natural and conversational — warm, engaged,
-  and genuinely interested in each other's points.
-- Inline markers in the script must be performed:
-  * [pause] → a brief 0.5–1 second natural thinking pause
-  * [laughs] → a brief, genuine light laugh
-  * [sighs] → a thoughtful, reflective exhale
-- "um," and "you know," → performed as natural hesitations, not awkward gaps
-- Contractions everywhere — "it's", "we're", "they've", "can't"
-- Natural sentence-final intonation — statements fall, questions rise,
-  excited points get a slight upward lift mid-sentence
-- Energy modulates with content: thoughtful moments slow down slightly,
-  exciting revelations pick up pace
-- Hosts react to each other even in short interjections ("Totally.",
-  "Right.", "Exactly.") — these should sound connected, not robotic
-
-Pacing:
-- Conversational pace: approximately 130–150 words per minute
-- Natural micro-pauses between clauses within a speaker's turn
-- Clean, brief pause between speaker transitions
-
-{HOST_1['name']}'s Voice Profile ({HOST_1['voice']}):
-- Upbeat, curious, accessible energy
-- Slight rise in pitch when asking questions
-- Warm laughter when appropriate
-- Emphasises words naturally for clarity
-
-{HOST_2['name']}'s Voice Profile ({HOST_2['voice']}):
-- Measured, authoritative, occasionally dry
-- Slight deliberative pause before answering complex points
-- Confident downward inflection on key facts
-- Warm but controlled enthusiasm
-{extra_style}
-
-### TRANSCRIPT
-{script_chunk}"""
-
-    return prompt
+    logger.info("Parsed %d speaker turns from script.", len(turns))
+    return turns
 
 
 # ---------------------------------------------------------------------------
-# Script Chunking
+# Turn-based Chunking
 # ---------------------------------------------------------------------------
 
-def _split_script_into_chunks(script: str, target_words_per_chunk: int) -> list[str]:
+def _chunk_turns(
+    turns: list[texttospeech.MultiSpeakerMarkup.Turn],
+    target_words: int,
+) -> list[list[texttospeech.MultiSpeakerMarkup.Turn]]:
     """
-    Splits a long script into chunks at natural speaker-turn boundaries.
-    Tries to keep each chunk under target_words_per_chunk words while
-    ensuring chunks don't split mid-turn.
+    Splits a turn list into chunks, each roughly target_words words long.
+    Splits only at turn boundaries so no turn is ever cut mid-sentence.
     """
-    total_words = len(script.split())
-    if total_words <= target_words_per_chunk:
-        return [script]
+    total_words = sum(len(t.text.split()) for t in turns)
+    if total_words <= target_words:
+        return [turns]
 
-    # Split on speaker turns (lines starting with Alex: or Jordan:)
-    # Keep the separator with each turn
-    turns = re.split(r"(?=\n(?:Alex|Jordan):)", script)
-    turns = [t.strip() for t in turns if t.strip()]
-
-    chunks = []
-    current_chunk_turns = []
-    current_word_count = 0
+    chunks: list[list[texttospeech.MultiSpeakerMarkup.Turn]] = []
+    current: list[texttospeech.MultiSpeakerMarkup.Turn] =[]
+    current_words = 0
 
     for turn in turns:
-        turn_words = len(turn.split())
-
-        if current_word_count + turn_words > target_words_per_chunk and current_chunk_turns:
-            chunks.append("\n\n".join(current_chunk_turns))
-            current_chunk_turns = [turn]
-            current_word_count = turn_words
+        turn_words = len(turn.text.split())
+        if current_words + turn_words > target_words and current:
+            chunks.append(current)
+            current       = [turn]
+            current_words = turn_words
         else:
-            current_chunk_turns.append(turn)
-            current_word_count += turn_words
+            current.append(turn)
+            current_words += turn_words
 
-    if current_chunk_turns:
-        chunks.append("\n\n".join(current_chunk_turns))
+    if current:
+        chunks.append(current)
 
     logger.info(
-        "Script split into %d chunk(s) (total %d words)", len(chunks), total_words
+        "Split %d turns into %d chunk(s) (total ~%d words)",
+        len(turns), len(chunks), total_words,
     )
     return chunks
 
@@ -246,16 +246,12 @@ def _write_wav_gcs(gcs_path: str, wav_bytes: bytes) -> str:
     """
     Uploads WAV bytes to Google Cloud Storage.
 
-    Follows the official GCS Python client library pattern:
-    https://cloud.google.com/storage/docs/uploading-objects#python
-
     Args:
         gcs_path:  Full GCS destination URI (e.g. gs://bucket/file.wav).
         wav_bytes: WAV-headered audio bytes to upload.
 
     Returns:
-        The authenticated GCS URL (https://storage.cloud.google.com/bucket/blob)
-        of the uploaded file.
+        The authenticated GCS URL of the uploaded file.
     """
     from google.cloud import storage
 
@@ -267,10 +263,7 @@ def _write_wav_gcs(gcs_path: str, wav_bytes: bytes) -> str:
     bucket         = storage_client.bucket(bucket_name)
     blob           = bucket.blob(blob_name)
 
-    # generation_match_precondition=0 ensures the upload aborts if an object
-    # with the same name already exists, preventing accidental overwrites.
     generation_match_precondition = 0
-
     blob.upload_from_string(
         wav_bytes,
         content_type="audio/wav",
@@ -296,14 +289,15 @@ async def generate_podcast_audio(
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
     """
-    Converts a formatted two-host podcast script to a WAV audio file.
+    Converts a formatted two-host podcast script to a WAV audio file using
+    the Cloud Text-to-Speech API with MultiSpeakerMarkup structured turns.
 
-    Uses Gemini TTS with multi-speaker voice config.
-    Long scripts are split into chunks and concatenated.
+    The script is parsed into explicit Turn objects so dialogue and director's
+    notes are fully separated — the model is never at risk of speaking the
+    prompt instructions.
 
     Output destination is controlled by output_mode in agent_configuration.json:
       - "artifact"  Save as an ADK artifact (presented as a download link in the UI).
-                    Requires the Runner to be configured with an ArtifactService.
       - "gcs"       Upload to Google Cloud Storage (write_to_gcs must be True).
       - "local"     Write to a local directory on disk.
 
@@ -312,23 +306,20 @@ async def generate_podcast_audio(
                            defined in agent_configuration.json.
         podcast_title:     Episode title (used for filename and TTS prompt context).
         write_to_gcs:      Legacy flag — still honoured when output_mode is "gcs".
-                           Ignored when output_mode is "artifact" or "local".
         gcs_output_bucket: GCS bucket URI to upload to when output_mode is "gcs".
-                           Defaults to gcs_output_bucket in agent_configuration.json.
         output_dir:        Local directory to write the WAV when output_mode is "local".
-                           Defaults to local_output_dir in agent_configuration.json.
-        style_guidance:    Optional extra style notes to include in the TTS prompt.
+        style_guidance:    Optional extra style notes included in director's notes.
         tool_context:      Injected automatically by ADK. Required for artifact output.
 
     Returns:
         A dict with keys:
         - success (bool)
-        - output_path (str): Artifact filename, GCS URI, or local absolute path.
-        - output_url (str):  Authenticated GCS URL when output_mode is "gcs", else "".
-        - artifact_saved (bool): True when the WAV was saved as an ADK artifact.
-        - duration_seconds (int): Estimated audio duration.
-        - duration_minutes (float): Estimated audio duration in minutes.
-        - chunks_processed (int): Number of TTS API calls made.
+        - output_path (str)
+        - output_url (str)
+        - artifact_saved (bool)
+        - duration_seconds (int)
+        - duration_minutes (float)
+        - chunks_processed (int)
         - model_used (str)
         - error (str)
     """
@@ -337,82 +328,85 @@ async def generate_podcast_audio(
         timestamp       = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_filename = f"{safe_title}_{timestamp}.wav"
 
-        # Split script into manageable chunks if needed
-        chunks = _split_script_into_chunks(script, CHUNK_TARGET_WORDS)
-        logger.info("Processing %d TTS chunk(s) for '%s'", len(chunks), podcast_title)
+        # -- 1. Parse script into structured turns ---------------------------
+        all_turns = _parse_script_to_turns(script)
 
-        all_audio_frames: list[bytes] = []
+        # -- 2. Split into chunks at turn boundaries -------------------------
+        turn_chunks = _chunk_turns(all_turns, CHUNK_TARGET_WORDS)
+        logger.info(
+            "Processing %d TTS chunk(s) for '%s'", len(turn_chunks), podcast_title
+        )
+
+        # -- 3. Voice configuration (shared across all chunks) ---------------
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="en-US",
+            model_name=_TTS_API_MODEL,
+            multi_speaker_voice_config=texttospeech.MultiSpeakerVoiceConfig(
+                speaker_voice_configs=[
+                    texttospeech.MultispeakerPrebuiltVoice(
+                        speaker_alias=HOST_1["name"],
+                        speaker_id=HOST_1["voice"],
+                    ),
+                    texttospeech.MultispeakerPrebuiltVoice(
+                        speaker_alias=HOST_2["name"],
+                        speaker_id=HOST_2["voice"],
+                    ),
+                ]
+            ),
+        )
+
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+            sample_rate_hertz=AUDIO_SAMPLE_RATE,
+        )
+
+        # -- 4. Synthesise each chunk ----------------------------------------
+        all_audio_frames: list[bytes] =[]
         chunks_processed = 0
 
-        for i, chunk in enumerate(chunks):
-            logger.info("  Generating audio for chunk %d/%d...", i + 1, len(chunks))
+        for i, turns in enumerate(turn_chunks):
+            logger.info("  Generating audio for chunk %d/%d...", i + 1, len(turn_chunks))
 
-            tts_prompt = _build_tts_prompt(
-                script_chunk=chunk,
+            director_notes = _build_director_notes(
                 podcast_title=podcast_title,
                 style_guidance=style_guidance,
                 chunk_index=i,
-                total_chunks=len(chunks),
+                total_chunks=len(turn_chunks),
             )
 
-            response = client.models.generate_content(
-                model=TTS_MODEL,
-                contents=tts_prompt,
-                config=types.GenerateContentConfig(
-                    response_modalities=["AUDIO"],
-                    speech_config=types.SpeechConfig(
-                        multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(
-                            speaker_voice_configs=[
-                                types.SpeakerVoiceConfig(
-                                    speaker=HOST_1["name"],
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name=HOST_1["voice"]
-                                        )
-                                    ),
-                                ),
-                                types.SpeakerVoiceConfig(
-                                    speaker=HOST_2["name"],
-                                    voice_config=types.VoiceConfig(
-                                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                                            voice_name=HOST_2["voice"]
-                                        )
-                                    ),
-                                ),
-                            ]
-                        )
-                    ),
-                ),
+            synthesis_input = texttospeech.SynthesisInput(
+                multi_speaker_markup=texttospeech.MultiSpeakerMarkup(turns=turns),
+                prompt=director_notes,
             )
 
-            audio_data = response.candidates[0].content.parts[0].inline_data.data
-            all_audio_frames.append(audio_data)
+            response = tts_client.synthesize_speech(
+                input=synthesis_input,
+                voice=voice,
+                audio_config=audio_config,
+            )
+
+            all_audio_frames.append(response.audio_content)
             chunks_processed += 1
 
-        # Combine raw PCM frames and wrap in WAV header
+        # -- 5. Combine raw PCM frames and wrap in WAV header ----------------
+        # LINEAR16 from Cloud TTS is raw 16-bit signed little-endian PCM —
+        # no WAV header included, same as the genai SDK inline_data output.
         combined_pcm = b"".join(all_audio_frames)
         wav_bytes    = _build_wav_bytes(combined_pcm)
 
-        # Estimate duration: 16-bit mono PCM = 2 bytes/sample × 24000 samples/sec
         bytes_per_second = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * AUDIO_SAMPLE_WIDTH
         duration_seconds = len(combined_pcm) // bytes_per_second
 
-        # -------------------------------------------------------------------
-        # Output routing: artifact | gcs | local
-        # Controlled by output_mode in agent_configuration.json.
-        # Legacy write_to_gcs=True is still honoured as an alias for "gcs".
-        # -------------------------------------------------------------------
+        # -- 6. Output routing -----------------------------------------------
         effective_mode = OUTPUT_MODE
         if write_to_gcs and effective_mode not in ("artifact", "gcs"):
             effective_mode = "gcs"
 
         if effective_mode == "artifact":
-            # -- ADK Artifact -----------------------------------------------
             if tool_context is None:
                 raise RuntimeError(
                     "output_mode is 'artifact' but tool_context is None. "
-                    "Ensure the Runner is configured with an ArtifactService "
-                    "(InMemoryArtifactService for dev, GcsArtifactService for prod)."
+                    "Ensure the Runner is configured with an ArtifactService."
                 )
 
             artifact_part = types.Part(
@@ -438,12 +432,11 @@ async def generate_podcast_audio(
                 "duration_seconds": duration_seconds,
                 "duration_minutes": round(duration_seconds / 60, 1),
                 "chunks_processed": chunks_processed,
-                "model_used":       TTS_MODEL,
+                "model_used":       _TTS_API_MODEL,
                 "error":            "",
             }
 
         elif effective_mode == "gcs":
-            # -- Google Cloud Storage ---------------------------------------
             bucket     = (gcs_output_bucket or GCS_OUTPUT_BUCKET).rstrip("/")
             gcs_uri    = f"{bucket}/{output_filename}"
             output_url = _write_wav_gcs(gcs_uri, wav_bytes)
@@ -459,12 +452,11 @@ async def generate_podcast_audio(
                 "duration_seconds": duration_seconds,
                 "duration_minutes": round(duration_seconds / 60, 1),
                 "chunks_processed": chunks_processed,
-                "model_used":       TTS_MODEL,
+                "model_used":       _TTS_API_MODEL,
                 "error":            "",
             }
 
         else:
-            # -- Local filesystem -------------------------------------------
             if output_dir is None:
                 output_dir = os.environ.get("PODCAST_OUTPUT_DIR", OUTPUT_DIR)
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -483,7 +475,7 @@ async def generate_podcast_audio(
                 "duration_seconds": duration_seconds,
                 "duration_minutes": round(duration_seconds / 60, 1),
                 "chunks_processed": chunks_processed,
-                "model_used":       TTS_MODEL,
+                "model_used":       _TTS_API_MODEL,
                 "error":            "",
             }
 
@@ -511,7 +503,8 @@ audio_producer_agent = Agent(
     model=AUDIO_PRODUCER_MODEL,
     description=(
         "Converts a formatted podcast script into a high-quality multi-speaker "
-        "WAV audio file using Gemini TTS. Supports local and GCS output."
+        "WAV audio file using Gemini TTS via the Cloud Text-to-Speech API. "
+        "Supports local, GCS, and ADK artifact output."
     ),
     instruction="""
 You are the **Audio Producer** agent. Your sole responsibility is to take a
@@ -531,10 +524,12 @@ completed, formatted podcast script and produce a high-quality audio file.
 ## What You Should Know About the TTS Process
 
 The `generate_podcast_audio` tool will:
-- Construct a rich Director's Notes prompt (Audio Profile + Scene + Director's
-  Notes) around the script to guide the TTS model
+- Parse the script into structured speaker turns (MultiSpeakerMarkup) so
+  dialogue and director's notes are fully separated
+- Build Director's Notes (Audio Profile + Scene + Style guidance) passed as
+  a separate prompt field — the model never speaks these aloud
 - Load host names and voices from agent_configuration.json
-- Pass the script to the TTS model with multi-speaker config
+- Synthesise each chunk via the Cloud Text-to-Speech API
 - Save the result as a 24kHz mono PCM WAV file
 
 ## Your Output
@@ -549,10 +544,8 @@ After calling the tool, return in markdown the following output format:
 
 ## Podcast:
 - If `artifact_saved` is True in the tool result: state that the podcast has
-  been saved as a downloadable artifact — the download link will appear
-  automatically in the chat UI as a blue button labelled with the filename.
+  been presented in the chat session player
 - If `output_url` is non-empty: provide it as a clickable GCS URL.
-- If neither: provide the local file path returned in `output_path`.
 
 Example output (artifact mode):
 ## Title: The Joy of Fishing (1:30)
@@ -564,18 +557,14 @@ Jordan: I sure do!
 ...
 -------------------------------------------------------------------------
 
-## Podcast:
-Your podcast has been saved as a downloadable artifact: **The_Joy_of_Fishing_20260316_174813.wav**
-Click the download button above to save it.
-
 Example output (GCS mode):
 ## Podcast Location:
 https://storage.cloud.google.com/podcast_agent_output/The_Joy_of_Fishing_20260316_174813.wav
 
 If the tool returns an error, report it clearly to the orchestrator with
-suggestions (e.g., script may be too long for a single TTS call — suggest
-chunking).
+suggestions (e.g., check that host voice IDs in agent_configuration.json
+are valid Gemini TTS voice names).
 """,
     tools=[generate_podcast_audio],
-    output_key="final_output"
+    output_key="final_output",
 )

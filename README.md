@@ -7,10 +7,19 @@ The agent pipeline handles everything: research → script writing → multi-spe
 Known Bugs:
  - Sometimes TTS background text makes it into the podcast (rare)
  - Sometimes in GCS output mode, the wrong URL will be gave, file will be in GCS
- 
+
+Updates 20260318-1422:
+ - Migrated from genAI SDK to texttospeech SDK in order to eliminate scene bleed into the script
+    - now uses MultiSpeakerMarkup turns to drive TTS
+ - In certain situations, scene bleeding into script was still happening, the following updates have helped:
+    - removed markdown from scene description, this seemed to sometimes confuse TTS model and drive bleeding into script
+    - flattend scene text into a single dense block of text
+    - added explicit system prefix: "System Instructions (Do not read aloud):"
+ - Updated requirements.txt to include 'google-cloud-texttospeech'
+
 Updates 20260317-1914:
- - support for UI based uploads of files (adk web or Gemini Enterprise)
- - support for artifact based podcast output (output to web UI directly)
+ - Support for UI based uploads of files (adk web or Gemini Enterprise)
+ - Support for artifact based podcast output (output to web UI directly)
  
 ---
 

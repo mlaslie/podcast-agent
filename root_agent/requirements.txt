@@ -1,3 +1,4 @@
 google-cloud-aiplatform[agent_engines,adk]
 google-cloud-storage
 google-genai
+google-cloud-texttospeech
