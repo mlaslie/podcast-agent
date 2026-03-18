@@ -25,6 +25,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools import google_search
+from google.adk.tools import ToolContext
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
 
@@ -54,6 +55,16 @@ _EXT_TO_MIME: dict[str, str] = {
     ".html": "text/html",
     ".csv":  "text/csv",
     ".json": "application/json",
+}
+
+# Reverse mapping used by _save_uploads_as_artifacts to derive file extensions
+# from MIME types when naming artifacts.
+_MIME_TO_EXT: dict[str, str] = {
+    "application/pdf": ".pdf",
+    "text/plain":      ".txt",
+    "text/html":       ".html",
+    "text/csv":        ".csv",
+    "application/json": ".json",
 }
 
 # ---------------------------------------------------------------------------
@@ -127,62 +138,64 @@ def fetch_gcs_document(gcs_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Uploaded File Function Tool
+# Artifact Fetcher Function Tool
 # ---------------------------------------------------------------------------
 
-def fetch_uploaded_file(file_path: str) -> dict:
+async def fetch_artifact(filename: str, tool_context: ToolContext) -> dict:
     """
-    Reads a locally uploaded file and returns its content as base64.
+    Loads a user-uploaded file from the ADK artifact store and returns its
+    content as base64.
 
-    The before_model_callback (_inject_gcs_parts) intercepts this tool result
-    and injects a native types.Part.from_bytes() into the outbound LLM request
-    so Gemini reads the file content directly — same pattern as GCS files.
+    Uploaded files are saved as artifacts by the _save_uploads_as_artifacts
+    before_agent_callback when the user's message arrives. This tool retrieves
+    them by name so the before_model_callback (_inject_gcs_parts) can inject
+    the bytes as a native types.Part.from_bytes() into the LLM request.
+
+    This is the Agent Engine-compatible replacement for fetch_uploaded_file,
+    which relied on local disk paths that do not exist in Agent Engine.
 
     Supported formats: .pdf, .txt, .md, .html, .csv, .json
 
     Args:
-        file_path: Absolute or relative path to the uploaded file on disk.
+        filename: The artifact filename as saved by _save_uploads_as_artifacts
+                  (e.g. "upload_0_report.pdf"). Use list_uploaded_files to
+                  discover available filenames.
+        tool_context: Injected automatically by ADK.
 
     Returns:
         A dict with keys:
-          - success      (bool)
-          - file_path    (str)
-          - filename     (str)
-          - mime_type    (str)   MIME type Gemini will use to read the file
-          - file_type    (str)   file extension
-          - data_b64     (str)   base64-encoded file content
-          - source       (str)   always "upload" — used by the callback to
-                                 distinguish from fetch_gcs_document results
-          - error        (str)
+          - success    (bool)
+          - filename   (str)
+          - mime_type  (str)
+          - file_type  (str)
+          - data_b64   (str)   base64-encoded file bytes
+          - source     (str)   always "upload" — signals the callback to use
+                               Part.from_bytes() rather than Part.from_uri()
+          - error      (str)
     """
     try:
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: '{file_path}'")
+        artifact_part = await tool_context.load_artifact(filename)
 
-        ext       = path.suffix.lower()
-        mime_type = _EXT_TO_MIME.get(ext)
-
-        if not mime_type:
-            raise ValueError(
-                f"Unsupported file type '{ext}' for '{path.name}'. "
-                f"Supported types: {', '.join(sorted(_EXT_TO_MIME))}"
+        if artifact_part is None:
+            raise FileNotFoundError(
+                f"Artifact '{filename}' not found. "
+                "Ensure the file was uploaded in this session."
             )
 
-        raw_bytes = path.read_bytes()
-        data_b64  = base64.b64encode(raw_bytes).decode("utf-8")
+        raw_bytes = artifact_part.inline_data.data
+        mime_type = artifact_part.inline_data.mime_type
+        ext       = os.path.splitext(filename)[1].lower()
+
+        data_b64 = base64.b64encode(raw_bytes).decode("utf-8")
 
         logger.info(
-            "fetch_uploaded_file: file=%s mime_type=%s size=%d bytes",
-            path.name,
-            mime_type,
-            len(raw_bytes),
+            "fetch_artifact: filename=%s mime_type=%s size=%d bytes",
+            filename, mime_type, len(raw_bytes),
         )
 
         return {
             "success":   True,
-            "file_path": str(path.resolve()),
-            "filename":  path.name,
+            "filename":  filename,
             "mime_type": mime_type,
             "file_type": ext,
             "data_b64":  data_b64,
@@ -191,15 +204,51 @@ def fetch_uploaded_file(file_path: str) -> dict:
         }
 
     except Exception as exc:
-        logger.error("fetch_uploaded_file failed for %s: %s", file_path, exc)
+        logger.error("fetch_artifact failed for %s: %s", filename, exc)
         return {
             "success":   False,
-            "file_path": file_path,
-            "filename":  "",
+            "filename":  filename,
             "mime_type": "",
             "file_type": "",
             "data_b64":  "",
             "source":    "upload",
+            "error":     str(exc),
+        }
+
+
+async def list_uploaded_files(tool_context: ToolContext) -> dict:
+    """
+    Lists all uploaded files saved as artifacts in the current session.
+
+    Call this first when the user has uploaded files, to discover the
+    artifact filenames to pass to fetch_artifact.
+
+    Returns:
+        A dict with keys:
+          - success   (bool)
+          - filenames (list[str])  artifact filenames with "upload_" prefix
+          - count     (int)
+          - error     (str)
+    """
+    try:
+        all_artifacts = await tool_context.list_artifacts()
+        uploads = [f for f in (all_artifacts or []) if f.startswith("upload_")]
+
+        logger.info("list_uploaded_files: found %d upload artifact(s): %s", len(uploads), uploads)
+
+        return {
+            "success":   True,
+            "filenames": uploads,
+            "count":     len(uploads),
+            "error":     "",
+        }
+
+    except Exception as exc:
+        logger.error("list_uploaded_files failed: %s", exc)
+        return {
+            "success":   False,
+            "filenames": [],
+            "count":     0,
             "error":     str(exc),
         }
 
@@ -389,11 +438,77 @@ def list_gcs_folder(gcs_folder_path: str, max_files: int = 50) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Before-agent callback — saves inline upload blobs as ADK artifacts
+# ---------------------------------------------------------------------------
+
+async def _save_uploads_as_artifacts(callback_context: CallbackContext) -> None:
+    """
+    Scans every event in the current session for inline blob parts (i.e. files
+    the user uploaded through the Gemini Enterprise / Agent Engine UI) and saves
+    each one as a named ADK artifact so fetch_artifact can retrieve it by name.
+
+    Artifact naming convention: "upload_{index}_{original_filename}"
+    e.g. "upload_0_2025_tacoma_multimedia.pdf"
+
+    This runs once per agent invocation. Already-saved artifacts are skipped
+    (save_artifact creates a new version, so re-saving is harmless, but we
+    log a skip for clarity).
+
+    Why this is needed:
+        In Agent Engine / Gemini Enterprise, uploaded files arrive as
+        inline_data blobs inside the session's message history — there is no
+        filesystem path. This callback bridges that gap by persisting the blobs
+        into the ADK artifact store where tools can access them by name.
+    """
+    try:
+        existing = await callback_context.list_artifacts() or []
+        existing_set = set(existing)
+
+        upload_index = 0
+        for event in callback_context.session.events or []:
+            for part in (event.content.parts if event.content else []) or []:
+                if part.inline_data and part.inline_data.data:
+                    mime_type = part.inline_data.mime_type or "application/octet-stream"
+
+                    # Derive a clean filename from mime type if no name available
+                    ext = _MIME_TO_EXT.get(mime_type, ".bin")
+                    artifact_name = f"upload_{upload_index}{ext}"
+
+                    if artifact_name not in existing_set:
+                        artifact_part = types.Part(
+                            inline_data=types.Blob(
+                                data=part.inline_data.data,
+                                mime_type=mime_type,
+                            )
+                        )
+                        version = await callback_context.save_artifact(
+                            filename=artifact_name,
+                            artifact=artifact_part,
+                        )
+                        logger.info(
+                            "_save_uploads_as_artifacts: saved '%s' (mime=%s, %d bytes) as version %d",
+                            artifact_name, mime_type, len(part.inline_data.data), version,
+                        )
+                    else:
+                        logger.debug(
+                            "_save_uploads_as_artifacts: '%s' already exists, skipping",
+                            artifact_name,
+                        )
+
+                    upload_index += 1
+
+    except Exception as exc:
+        # Non-fatal — log and continue. Agent will still run; uploaded files
+        # simply won't be available via fetch_artifact.
+        logger.error("_save_uploads_as_artifacts failed: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Google Search Sub-Agent | Used as AgentTool as Workaround
 # ---------------------------------------------------------------------------
 search_agent = Agent(
     model=SEARCH_AGENT_MODEL,
-    name="SearchAgent",
+    name="search_agent",
     instruction="""
     You're a specialist in Google Search.
 
@@ -411,13 +526,14 @@ source_collector_agent = Agent(
     model=DATA_COLLECTOR_MODEL,
     description=(
         "Fetches and consolidates content from Google Cloud Storage "
-        "paths and free-form topics into a single research package."
+        "paths, uploaded files, and free-form topics into a single research package."
     ),
+    before_agent_callback=_save_uploads_as_artifacts,
     before_model_callback=_inject_gcs_parts,
     instruction="""
     You are a research agent whose research will be used to generate
     an insightful podcast. Your goal is to take the user-provided input
-    of GCS bucket(s), GCS file(s), uploaded local file(s), and/or free-form
+    of GCS bucket(s), GCS file(s), uploaded file(s), and/or free-form
     text about the podcast subject, and use your available tools to compose
     a very comprehensive research document as the output.
 
@@ -437,12 +553,13 @@ source_collector_agent = Agent(
       1. Call fetch_gcs_document for the path.
       2. Read the file in full and produce a comprehensive overview.
 
-    When locally uploaded files are provided (file paths on disk):
-      1. Call fetch_uploaded_file for each file path, one by one.
-         Files are loaded as bytes directly into your context.
-      2. For each file, produce a verbose and comprehensive overview
+    When the user has uploaded files directly to the chat:
+      1. Call list_uploaded_files to discover available artifact filenames.
+      2. Call fetch_artifact for each filename returned, one by one.
+         File bytes are loaded directly into your context.
+      3. For each file, produce a verbose and comprehensive overview
          covering key points, figures, quotes, and interesting details.
-      3. Repeat until all uploaded files are processed.
+      4. Repeat until all uploaded files are processed.
 
     When the request includes free-form text topics:
       - Use the search_agent tool to search Google for the topic and
@@ -452,6 +569,12 @@ source_collector_agent = Agent(
     Return all overviews combined as your output. This content will be
     consolidated and turned into a podcast script by another agent.
     """,
-    tools=[AgentTool(agent=search_agent), fetch_gcs_document, list_gcs_folder, fetch_uploaded_file],
+    tools=[
+        AgentTool(agent=search_agent),
+        fetch_gcs_document,
+        list_gcs_folder,
+        list_uploaded_files,
+        fetch_artifact,
+    ],
     output_key="generated_research",
 )
