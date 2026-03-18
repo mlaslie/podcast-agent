@@ -38,6 +38,9 @@
 
     "output": {
         "local_output_dir":   "output",
-        "gcs_output_bucket":  "gs://YOUR_DEFAULT_OUTPUT_BUCKET"
+        "gcs_output_bucket":  "gs://YOUR_DEFAULT_OUTPUT_BUCKET",
+        "output_mode":        "artifact",
+
+
     }
 }

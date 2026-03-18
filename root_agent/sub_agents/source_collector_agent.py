@@ -13,12 +13,7 @@
 #   .csv   → text/csv
 #   .json  → application/json
 
-#
-# supported file formats could easily be extended to all gemini model types by updating _EXT_TO_MIME
-# additional formats such as: audio, video, images
-# supported file formats --> https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/3-1-flash-lite
-#
-
+import base64
 import json
 import logging
 import os
@@ -132,6 +127,84 @@ def fetch_gcs_document(gcs_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Uploaded File Function Tool
+# ---------------------------------------------------------------------------
+
+def fetch_uploaded_file(file_path: str) -> dict:
+    """
+    Reads a locally uploaded file and returns its content as base64.
+
+    The before_model_callback (_inject_gcs_parts) intercepts this tool result
+    and injects a native types.Part.from_bytes() into the outbound LLM request
+    so Gemini reads the file content directly — same pattern as GCS files.
+
+    Supported formats: .pdf, .txt, .md, .html, .csv, .json
+
+    Args:
+        file_path: Absolute or relative path to the uploaded file on disk.
+
+    Returns:
+        A dict with keys:
+          - success      (bool)
+          - file_path    (str)
+          - filename     (str)
+          - mime_type    (str)   MIME type Gemini will use to read the file
+          - file_type    (str)   file extension
+          - data_b64     (str)   base64-encoded file content
+          - source       (str)   always "upload" — used by the callback to
+                                 distinguish from fetch_gcs_document results
+          - error        (str)
+    """
+    try:
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: '{file_path}'")
+
+        ext       = path.suffix.lower()
+        mime_type = _EXT_TO_MIME.get(ext)
+
+        if not mime_type:
+            raise ValueError(
+                f"Unsupported file type '{ext}' for '{path.name}'. "
+                f"Supported types: {', '.join(sorted(_EXT_TO_MIME))}"
+            )
+
+        raw_bytes = path.read_bytes()
+        data_b64  = base64.b64encode(raw_bytes).decode("utf-8")
+
+        logger.info(
+            "fetch_uploaded_file: file=%s mime_type=%s size=%d bytes",
+            path.name,
+            mime_type,
+            len(raw_bytes),
+        )
+
+        return {
+            "success":   True,
+            "file_path": str(path.resolve()),
+            "filename":  path.name,
+            "mime_type": mime_type,
+            "file_type": ext,
+            "data_b64":  data_b64,
+            "source":    "upload",
+            "error":     "",
+        }
+
+    except Exception as exc:
+        logger.error("fetch_uploaded_file failed for %s: %s", file_path, exc)
+        return {
+            "success":   False,
+            "file_path": file_path,
+            "filename":  "",
+            "mime_type": "",
+            "file_type": "",
+            "data_b64":  "",
+            "source":    "upload",
+            "error":     str(exc),
+        }
+
+
+# ---------------------------------------------------------------------------
 # Before-model callback — injects GCS file parts into the LLM request
 # ---------------------------------------------------------------------------
 
@@ -146,13 +219,14 @@ def _inject_gcs_parts(
     llm_request: LlmRequest,
 ) -> Optional[LlmResponse]:
     """
-    Converts fetch_gcs_document tool results into native GCS file parts.
+    Converts fetch_gcs_document and fetch_uploaded_file tool results into
+    native Gemini file parts so the model reads file content directly.
 
-    Both PDF and plain-text files are handled identically:
-        types.Part.from_uri(file_uri=gcs_path, mime_type=mime_type)
+    - fetch_gcs_document results  → types.Part.from_uri(gcs_path, mime_type)
+    - fetch_uploaded_file results → types.Part.from_bytes(b64_decoded, mime_type)
 
-    Gemini reads each file directly from GCS without any bytes passing
-    through the agent process.
+    No bytes pass through the agent process for GCS files; uploaded files are
+    decoded from the base64 payload returned by fetch_uploaded_file.
     """
     import json as _json
 
@@ -162,28 +236,22 @@ def _inject_gcs_parts(
             if part.text:
                 try:
                     result = _json.loads(part.text)
-                    if (
-                        isinstance(result, dict)
-                        and result.get("success")
-                        and result.get("mime_type")
-                        and result.get("gcs_path", "").startswith("gs://")
-                    ):
-                        gcs_uri   = result["gcs_path"]
-                        mime_type = result["mime_type"]
-                        filename  = result.get("filename", gcs_uri)
+                    if not (isinstance(result, dict) and result.get("success") and result.get("mime_type")):
+                        raise ValueError("not a file tool result")
+
+                    mime_type = result["mime_type"]
+                    filename  = result.get("filename", "unknown")
+
+                    # ── GCS file ──────────────────────────────────────────
+                    if result.get("gcs_path", "").startswith("gs://"):
+                        gcs_uri = result["gcs_path"]
                         logger.debug(
-                            "_inject_gcs_parts: injecting %s part for %s",
+                            "_inject_gcs_parts: injecting GCS %s part for %s",
                             mime_type, gcs_uri,
                         )
-
-                        # Native file part — Gemini reads directly from GCS
                         new_parts.append(
-                            types.Part.from_uri(
-                                file_uri=gcs_uri,
-                                mime_type=mime_type,
-                            )
+                            types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
                         )
-                        # Concise label so the model knows which file it's reading
                         new_parts.append(
                             types.Part.from_text(
                                 text=(
@@ -195,8 +263,31 @@ def _inject_gcs_parts(
                             )
                         )
                         continue  # drop the raw JSON tool-result part
-                except (_json.JSONDecodeError, TypeError):
-                    pass  # not a fetch_gcs_document result — leave unchanged
+
+                    # ── Uploaded file ──────────────────────────────────────
+                    if result.get("source") == "upload" and result.get("data_b64"):
+                        raw_bytes = base64.b64decode(result["data_b64"])
+                        logger.debug(
+                            "_inject_gcs_parts: injecting uploaded %s part for %s (%d bytes)",
+                            mime_type, filename, len(raw_bytes),
+                        )
+                        new_parts.append(
+                            types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
+                        )
+                        new_parts.append(
+                            types.Part.from_text(
+                                text=(
+                                    f"[Uploaded file loaded: {filename} "
+                                    f"({mime_type}). Read it in full and "
+                                    "include all key points, figures, and details in "
+                                    "your research.]"
+                                )
+                            )
+                        )
+                        continue  # drop the raw JSON tool-result part
+
+                except (ValueError, _json.JSONDecodeError, TypeError, KeyError):
+                    pass  # not a recognised file tool result — leave unchanged
 
             new_parts.append(part)
 
@@ -326,11 +417,11 @@ source_collector_agent = Agent(
     instruction="""
     You are a research agent whose research will be used to generate
     an insightful podcast. Your goal is to take the user-provided input
-    of GCS bucket(s), GCS file(s), and/or free-form text about the podcast
-    subject, and use your available tools to compose a very comprehensive
-    research document as the output.
+    of GCS bucket(s), GCS file(s), uploaded local file(s), and/or free-form
+    text about the podcast subject, and use your available tools to compose
+    a very comprehensive research document as the output.
 
-    Supported file types in GCS: .pdf, .txt, .md, .html, .csv, .json.
+    Supported file types in GCS and uploads: .pdf, .txt, .md, .html, .csv, .json.
     Any other file types in a folder will be automatically skipped.
 
     When a GCS bucket or folder is provided:
@@ -342,6 +433,17 @@ source_collector_agent = Agent(
          covering key points, figures, quotes, and interesting details.
       4. Repeat until all files are processed.
 
+    When a GCS document path is provided directly (not a folder):
+      1. Call fetch_gcs_document for the path.
+      2. Read the file in full and produce a comprehensive overview.
+
+    When locally uploaded files are provided (file paths on disk):
+      1. Call fetch_uploaded_file for each file path, one by one.
+         Files are loaded as bytes directly into your context.
+      2. For each file, produce a verbose and comprehensive overview
+         covering key points, figures, quotes, and interesting details.
+      3. Repeat until all uploaded files are processed.
+
     When the request includes free-form text topics:
       - Use the search_agent tool to search Google for the topic and
         relevant adjacent subjects.
@@ -350,6 +452,6 @@ source_collector_agent = Agent(
     Return all overviews combined as your output. This content will be
     consolidated and turned into a podcast script by another agent.
     """,
-    tools=[AgentTool(agent=search_agent), fetch_gcs_document, list_gcs_folder],
+    tools=[AgentTool(agent=search_agent), fetch_gcs_document, list_gcs_folder, fetch_uploaded_file],
     output_key="generated_research",
 )

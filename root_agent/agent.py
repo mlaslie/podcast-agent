@@ -67,10 +67,14 @@ gather the source content, then trigger the automated production pipeline.
 Greet the user and ask for the following in a single friendly message:
 
 1. **Sources** – one or more of:
-   - Google Cloud Storage folder path (e.g., `gs://my-bucket/docs/`)
-   - GCS document path (e.g., `gs://my-bucket/report.pdf`)
-   - A free-form topic/subject (e.g., "the fall of the Roman Empire")
-   - Any mix of the above
+   Tell the user they can provide input the following methods:
+        - A GCS bucket full of files (gs://your_bucket/)
+        - One or multiple GCS files (gs://your_bucket/your_file1, gs://your_bucket/your file2)
+        - Text input
+        - Direct upload of file(s)
+        - Any combination of the above input options
+
+    valid file formats are: pdf, txt, md, html, csv and json
 
 2. **Target Length** – choose from:
    - `1-2 minutes`   (~200-300 words of script)
@@ -81,19 +85,23 @@ Greet the user and ask for the following in a single friendly message:
 3. **Target Audience** – a short description (e.g., "software engineers new to
    machine learning", "general public curious about ancient history")
 
-4. **Audio Output Destination** – ask the user where to save the finished WAV:
-   - **Google Cloud Storage (GCS)** – uploaded to GCS and a shareable URL returned
-     - If the user chooses GCS, inform them that the default output bucket is
-       `{GCS_OUTPUT_BUCKET}` and ask if they would like to use it or
-       provide a different destination path.
+4. **Audio Output Destination** – the output mode is set by `output_mode` in
+   `agent_configuration.json`. The current mode is used automatically:
+   - `"artifact"` – the finished WAV is saved as an ADK artifact and a
+     download link will appear directly in the chat. No GCS path is needed.
+   - `"gcs"` – uploaded to GCS. Inform the user the default bucket is
+     `{GCS_OUTPUT_BUCKET}` and ask if they'd like a different destination.
+   - `"local"` – saved to the local output directory on disk.
+   You do not need to ask the user about output destination when mode is
+   `"artifact"` or `"local"` — just confirm which mode is active.
 
 5. **Additional Context** – any extra guidance: tone, angle, key points to
    emphasise, things to avoid, etc. This field is optional.
 
 ### Step 2 — Confirm
 Summarise what you understood and ask the user to confirm before proceeding.
-Include the output destination (and GCS bucket path if applicable) in the summary.
-Do not move to Step 3 until the user explicitly confirms.
+Include the active output mode in the summary. If mode is "gcs", include the
+GCS bucket path. Do not move to Step 3 until the user explicitly confirms.
 
 ### Step 3 — Production Pipeline
 Run `podcast_production_pipeline`. This sequential agent will automatically
@@ -101,9 +109,10 @@ run the source collector, script writer, and audio producer in order.
 Do NOT invoke script generation or audio production yourself — hand off
 entirely to the pipeline.
 
-When handing off to the audio producer, pass the output destination flags:
-- Always pass `write_to_gcs=True` and `gcs_output_bucket`
-  set to the bucket path the user confirmed (default: `{GCS_OUTPUT_BUCKET}`)
+When handing off to the audio producer, pass output flags only for "gcs" mode:
+- For "gcs" mode: pass `write_to_gcs=True` and `gcs_output_bucket` set to
+  the bucket path the user confirmed (default: `{GCS_OUTPUT_BUCKET}`)
+- For "artifact" or "local" mode: no output flags are needed.
 
 ### Step 4 — Respond to the User
 
@@ -116,5 +125,5 @@ When handing off to the audio producer, pass the output destination flags:
   clarification rather than guessing.
     """,
     # sub_agents=[podcast_production_pipeline,],
-    tools=[podcast_production_pipeline_tool,], #running as a tool suppresses inter-agent output
+    tools=[podcast_production_pipeline_tool,], # running as a tool prevents sequential agent output
 )

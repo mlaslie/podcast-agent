@@ -14,6 +14,7 @@ from typing import Optional
 
 from google import genai
 from google.adk.agents import Agent
+from google.adk.tools import ToolContext
 from google.genai import types
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ CHUNK_TARGET_WORDS = _AUDIO["chunk_target_words"]
 
 OUTPUT_DIR        = _OUTPUT["local_output_dir"]
 GCS_OUTPUT_BUCKET = _OUTPUT["gcs_output_bucket"]
+OUTPUT_MODE       = _OUTPUT.get("output_mode", "gcs")  # "artifact" | "gcs" | "local"
 
 
 # ---------------------------------------------------------------------------
@@ -114,13 +116,6 @@ def _build_tts_prompt(
     extra_style = ""
     if style_guidance:
         extra_style = f"\nAdditional Style Notes: {style_guidance}\n"
-
-#
-# The below big prompt kind sometime trigger an issue where Gemini TTS includes
-# The scene, style, title...etc in the audio generation
-# Seems to happen rarely with 2.5 Flash TTS
-# Have not tested with 2.5 Pro TTS yet
-#
 
     prompt = f"""# AUDIO PROFILE: Two-Host Podcast
 ## "{podcast_title}"
@@ -291,13 +286,14 @@ def _write_wav_gcs(gcs_path: str, wav_bytes: bytes) -> str:
 # Podcast Generation Function Tool
 # ---------------------------------------------------------------------------
 
-def generate_podcast_audio(
+async def generate_podcast_audio(
     script: str,
     podcast_title: str,
     write_to_gcs: bool = False,
     gcs_output_bucket: Optional[str] = None,
     output_dir: Optional[str] = None,
     style_guidance: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
 ) -> dict:
     """
     Converts a formatted two-host podcast script to a WAV audio file.
@@ -305,24 +301,31 @@ def generate_podcast_audio(
     Uses Gemini TTS with multi-speaker voice config.
     Long scripts are split into chunks and concatenated.
 
+    Output destination is controlled by output_mode in agent_configuration.json:
+      - "artifact"  Save as an ADK artifact (presented as a download link in the UI).
+                    Requires the Runner to be configured with an ArtifactService.
+      - "gcs"       Upload to Google Cloud Storage (write_to_gcs must be True).
+      - "local"     Write to a local directory on disk.
+
     Args:
         script:            Formatted script with speaker labels matching host names
                            defined in agent_configuration.json.
         podcast_title:     Episode title (used for filename and TTS prompt context).
-        write_to_gcs:      If True, upload the WAV to GCS instead of writing locally.
-                           Returns the authenticated GCS URL. Defaults to False.
-        gcs_output_bucket: GCS bucket URI to upload to when write_to_gcs=True.
+        write_to_gcs:      Legacy flag — still honoured when output_mode is "gcs".
+                           Ignored when output_mode is "artifact" or "local".
+        gcs_output_bucket: GCS bucket URI to upload to when output_mode is "gcs".
                            Defaults to gcs_output_bucket in agent_configuration.json.
-        output_dir:        Local directory to write the WAV file when write_to_gcs=False.
+        output_dir:        Local directory to write the WAV when output_mode is "local".
                            Defaults to local_output_dir in agent_configuration.json.
         style_guidance:    Optional extra style notes to include in the TTS prompt.
+        tool_context:      Injected automatically by ADK. Required for artifact output.
 
     Returns:
         A dict with keys:
         - success (bool)
-        - output_path (str): Local absolute path (write_to_gcs=False) or
-                             GCS URI (write_to_gcs=True).
-        - output_url (str):  Authenticated GCS URL when write_to_gcs=True, else empty string.
+        - output_path (str): Artifact filename, GCS URI, or local absolute path.
+        - output_url (str):  Authenticated GCS URL when output_mode is "gcs", else "".
+        - artifact_saved (bool): True when the WAV was saved as an ADK artifact.
         - duration_seconds (int): Estimated audio duration.
         - duration_minutes (float): Estimated audio duration in minutes.
         - chunks_processed (int): Number of TTS API calls made.
@@ -395,9 +398,52 @@ def generate_podcast_audio(
         duration_seconds = len(combined_pcm) // bytes_per_second
 
         # -------------------------------------------------------------------
-        # Output: GCS or local (local not implement in upstream agent)
+        # Output routing: artifact | gcs | local
+        # Controlled by output_mode in agent_configuration.json.
+        # Legacy write_to_gcs=True is still honoured as an alias for "gcs".
         # -------------------------------------------------------------------
-        if write_to_gcs:
+        effective_mode = OUTPUT_MODE
+        if write_to_gcs and effective_mode not in ("artifact", "gcs"):
+            effective_mode = "gcs"
+
+        if effective_mode == "artifact":
+            # -- ADK Artifact -----------------------------------------------
+            if tool_context is None:
+                raise RuntimeError(
+                    "output_mode is 'artifact' but tool_context is None. "
+                    "Ensure the Runner is configured with an ArtifactService "
+                    "(InMemoryArtifactService for dev, GcsArtifactService for prod)."
+                )
+
+            artifact_part = types.Part(
+                inline_data=types.Blob(
+                    data=wav_bytes,
+                    mime_type="audio/wav",
+                )
+            )
+            version = await tool_context.save_artifact(
+                filename=output_filename,
+                artifact=artifact_part,
+            )
+            logger.info(
+                "Audio saved as ADK artifact '%s' version %d (%.1f minutes)",
+                output_filename, version, duration_seconds / 60,
+            )
+            return {
+                "success":          True,
+                "output_path":      output_filename,
+                "output_url":       "",
+                "artifact_saved":   True,
+                "artifact_version": version,
+                "duration_seconds": duration_seconds,
+                "duration_minutes": round(duration_seconds / 60, 1),
+                "chunks_processed": chunks_processed,
+                "model_used":       TTS_MODEL,
+                "error":            "",
+            }
+
+        elif effective_mode == "gcs":
+            # -- Google Cloud Storage ---------------------------------------
             bucket     = (gcs_output_bucket or GCS_OUTPUT_BUCKET).rstrip("/")
             gcs_uri    = f"{bucket}/{output_filename}"
             output_url = _write_wav_gcs(gcs_uri, wav_bytes)
@@ -409,6 +455,7 @@ def generate_podcast_audio(
                 "success":          True,
                 "output_path":      gcs_uri,
                 "output_url":       output_url,
+                "artifact_saved":   False,
                 "duration_seconds": duration_seconds,
                 "duration_minutes": round(duration_seconds / 60, 1),
                 "chunks_processed": chunks_processed,
@@ -417,6 +464,7 @@ def generate_podcast_audio(
             }
 
         else:
+            # -- Local filesystem -------------------------------------------
             if output_dir is None:
                 output_dir = os.environ.get("PODCAST_OUTPUT_DIR", OUTPUT_DIR)
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -431,6 +479,7 @@ def generate_podcast_audio(
                 "success":          True,
                 "output_path":      os.path.abspath(local_path),
                 "output_url":       "",
+                "artifact_saved":   False,
                 "duration_seconds": duration_seconds,
                 "duration_minutes": round(duration_seconds / 60, 1),
                 "chunks_processed": chunks_processed,
@@ -444,6 +493,7 @@ def generate_podcast_audio(
             "success":          False,
             "output_path":      "",
             "output_url":       "",
+            "artifact_saved":   False,
             "duration_seconds": 0,
             "duration_minutes": 0,
             "chunks_processed": 0,
@@ -473,11 +523,10 @@ completed, formatted podcast script and produce a high-quality audio file.
     {base_script}
 
 2. Call `generate_podcast_audio` with the script, title, and any style guidance.
-   - If the orchestrator specifies `write_to_gcs=True`, pass that flag and
-     optionally a `gcs_output_bucket`. The file will be uploaded to GCS and
-     the authenticated GCS URL returned instead of a local path.
-   - If `write_to_gcs` is not specified, the default behaviour writes locally.
-3. Report back the output location and audio duration estimate.
+   - The output destination is controlled by `output_mode` in agent_configuration.json.
+   - For "gcs" mode: pass `write_to_gcs=True` and optionally a `gcs_output_bucket`.
+   - For "artifact" and "local" modes: no extra flags needed — the tool handles it.
+3. Report back using the output format below.
 
 ## What You Should Know About the TTS Process
 
@@ -498,27 +547,30 @@ After calling the tool, return in markdown the following output format:
 
 -------------------------------------------------------------------------
 
-## Podcast: 
-a clickable Google Cloud Storage authenticated URL or local system path to podcast file
+## Podcast:
+- If `artifact_saved` is True in the tool result: state that the podcast has
+  been saved as a downloadable artifact — the download link will appear
+  automatically in the chat UI as a blue button labelled with the filename.
+- If `output_url` is non-empty: provide it as a clickable GCS URL.
+- If neither: provide the local file path returned in `output_path`.
 
-Example output:
+Example output (artifact mode):
 ## Title: The Joy of Fishing (1:30)
 -------------------------------------------------------------------------
 ## Script:
-Jack: Hey Jordan, do you like fishing?
+Alex: Hey Jordan, do you like fishing?
 
 Jordan: I sure do!
-
-Jack: Well you'll going to love today's topic...we're talking about fishing.
-
-Jordon: Well today's my lucky day I guess
-
 ...
 -------------------------------------------------------------------------
 
-## Podcast Location: 
-https://storage.cloud.google.com/podcast_agent_output/The_Joy_of_Fishing_20260316_174813.wav
+## Podcast:
+Your podcast has been saved as a downloadable artifact: **The_Joy_of_Fishing_20260316_174813.wav**
+Click the download button above to save it.
 
+Example output (GCS mode):
+## Podcast Location:
+https://storage.cloud.google.com/podcast_agent_output/The_Joy_of_Fishing_20260316_174813.wav
 
 If the tool returns an error, report it clearly to the orchestrator with
 suggestions (e.g., script may be too long for a single TTS call — suggest

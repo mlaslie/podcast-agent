@@ -4,6 +4,14 @@ An AI-powered podcast creation service built with [Google ADK](https://google.gi
 
 The agent pipeline handles everything: research → script writing → multi-speaker TTS audio production.
 
+Known Bugs:
+ - Sometimes TTS background text makes it into the podcast (rare)
+ - Sometimes in GCS output mode, the wrong URL will be gave, file will be in GCS
+ 
+Updates 20260317-1914:
+ - support for UI based uploads of files (adk web or Gemini Enterprise)
+ - support for artifact based podcast output (output to web UI directly)
+ 
 ---
 
 ## How It Works
@@ -94,10 +102,20 @@ Replace the placeholder values with your own project settings:
     "location": "us-central1"
   },
   "output": {
-    "gcs_output_bucket": "gs://your-output-bucket"
+    "output_mode":        "artifact",
+    "local_output_dir":   "output",
+    "gcs_output_bucket":  "gs://podcast_agent_output"    
   }
 }
 ```
+
+output_mode:
+ - artifact = the podcast will be provided to the user via the UI directly
+ - gcs = output podcast to user provide GCS bucket (or gcs_output_bucket if not provided)
+ 
+local_output_dir: used for local testing, not supported currently
+
+gcs_output_bucket: if output_mode = "gcs" this is the default bucket where podcasts will be saved
 
 ---
 

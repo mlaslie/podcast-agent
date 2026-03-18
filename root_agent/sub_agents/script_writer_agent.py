@@ -1,6 +1,6 @@
 # script_writer_agent.py
 # Transforms research source material into a natural-sounding two-host podcast
-# script formatted for Gemini multi-speaker TTS
+# script formatted for Gemini multi-speaker TTS, featuring hosts Alex and Jordan.
 
 import json
 from pathlib import Path
