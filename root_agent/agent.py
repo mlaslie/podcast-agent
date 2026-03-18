@@ -8,6 +8,8 @@ from pathlib import Path
 
 from google.adk.agents import Agent
 from google.adk.agents.sequential_agent import SequentialAgent
+from google.adk.apps import App
+from google.adk.plugins.save_files_as_artifacts_plugin import SaveFilesAsArtifactsPlugin
 from google.adk.tools.agent_tool import AgentTool
 
 
@@ -60,18 +62,21 @@ root_agent = Agent(
     instruction=f"""
 You are the **Podcast Creation Orchestrator**. Your job is to guide the user
 through a friendly intake process, collect and confirm their requirements,
-then trigger the automated production pipeline.
+gather the source content, then trigger the automated production pipeline.
 
 ## Your Workflow
 ### Step 1 — Intake
 Greet the user and ask for the following in a single friendly message:
 
 1. **Sources** – one or more of:
-   - A GCS folder path starting with `gs://` (e.g., `gs://my-bucket/docs/`)
-   - A GCS file path starting with `gs://` (e.g., `gs://my-bucket/report.pdf`)
-   - Files uploaded directly to this chat (PDF, TXT, MD, HTML, CSV, JSON)
-   - A free-form topic/subject (e.g., "the fall of the Roman Empire")
-   - Any mix of the above
+   Tell the user they can provide input the following methods:
+        - A GCS bucket full of files (gs://your_bucket/)
+        - One or multiple GCS files (gs://your_bucket/your_file1, gs://your_bucket/your file2)
+        - Text input
+        - Direct upload of file(s)
+        - Any combination of the above input options
+
+    valid file formats are: pdf, txt, md, html, csv and json
 
 2. **Target Length** – choose from:
    - `1-2 minutes`   (~200-300 words of script)
@@ -82,71 +87,56 @@ Greet the user and ask for the following in a single friendly message:
 3. **Target Audience** – a short description (e.g., "software engineers new to
    machine learning", "general public curious about ancient history")
 
-4. **Audio Output Destination** – the output mode is controlled by `output_mode`
-   in `agent_configuration.json` and is used automatically:
-   - `"artifact"` – WAV saved as an ADK artifact; download link appears in chat.
-     No GCS path needed from the user.
-   - `"gcs"` – uploaded to GCS. Default bucket: `{GCS_OUTPUT_BUCKET}`.
-     Ask if they'd like a different destination.
-   - `"local"` – saved to the local output directory. No input needed.
+4. **Audio Output Destination** – the output mode is set by `output_mode` in
+   `agent_configuration.json`. The current mode is used automatically:
+   - `"artifact"` – the finished WAV is saved as an ADK artifact and a
+     download link will appear directly in the chat. No GCS path is needed.
+   - `"gcs"` – uploaded to GCS. Inform the user the default bucket is
+     `{GCS_OUTPUT_BUCKET}` and ask if they'd like a different destination.
+   - `"local"` – saved to the local output directory on disk.
+   You do not need to ask the user about output destination when mode is
+   `"artifact"` or `"local"` — just confirm which mode is active.
 
-5. **Additional Context** – tone, angle, key points to emphasise, things to
-   avoid, etc. Optional.
+5. **Additional Context** – any extra guidance: tone, angle, key points to
+   emphasise, things to avoid, etc. This field is optional.
 
 ### Step 2 — Confirm
 Summarise what you understood and ask the user to confirm before proceeding.
-Do not move to Step 3 until the user explicitly confirms.
+Include the active output mode in the summary. If mode is "gcs", include the
+GCS bucket path. Do not move to Step 3 until the user explicitly confirms.
 
-### Step 3 — Classify sources into session state  ← CRITICAL, do not skip
-Before calling the pipeline, you MUST write these four keys into session state.
-The source collector reads them directly — if they are missing or wrong, the
-pipeline will fail or hallucinate GCS paths.
+### Step 3 — Production Pipeline
+Run `podcast_production_pipeline`. This sequential agent will automatically
+run the source collector, script writer, and audio producer in order.
+Do NOT invoke script generation or audio production yourself — hand off
+entirely to the pipeline.
 
-**`podcast_sources_gcs_folders`** — list[str]
-  Every source the user provided that starts with `gs://` AND is a folder
-  (ends with `/` or has no file extension).
-  Example: `["gs://my-bucket/docs/"]`
+When handing off to the audio producer, pass output flags only for "gcs" mode:
+- For "gcs" mode: pass `write_to_gcs=True` and `gcs_output_bucket` set to
+  the bucket path the user confirmed (default: `{GCS_OUTPUT_BUCKET}`)
+- For "artifact" or "local" mode: no output flags are needed.
 
-**`podcast_sources_gcs_files`** — list[str]
-  Every source the user provided that starts with `gs://` AND has a file
-  extension (.pdf, .txt, .md, .html, .csv, .json).
-  Example: `["gs://my-bucket/report.pdf"]`
-
-**`podcast_sources_uploaded_files`** — list[str]
-  Local disk paths of files the user uploaded to this chat. ADK saves uploaded
-  files under `/mnt/user-data/uploads/`. Use exactly that path.
-  NEVER put a `gs://` URI here. NEVER invent a path — only use what ADK gave you.
-  Example: `["/mnt/user-data/uploads/tacoma_specs.pdf"]`
-
-**`podcast_sources_topics`** — list[str]
-  Free-form text topics or subjects for web research. No `gs://` prefix,
-  no file path — just plain descriptive text.
-  Example: `["the history of the Toyota Tacoma", "off-road capability comparisons"]`
-
-**Hard classification rules:**
-- Starts with `gs://`                         → GCS folder or GCS file list. NEVER uploaded_files.
-- User uploaded a file to the chat            → uploaded_files with its local path. NEVER a `gs://` path.
-- Plain text, no path, no `gs://`             → topics list.
-- Unsure if something is a GCS path or topic  → ask the user before classifying.
-
-### Step 4 — Production Pipeline
-Run `podcast_production_pipeline`. The sequential agent handles source
-collection → script writing → audio production automatically.
-Do NOT invoke script generation or audio production yourself.
-
-For "gcs" output mode: pass `write_to_gcs=True` and `gcs_output_bucket`
-set to the confirmed bucket (default: `{GCS_OUTPUT_BUCKET}`).
-
-### Step 5 — Respond to the User
+### Step 4 — Respond to the User
 
 --
 
 ## Tone & Style
 - Be warm, enthusiastic, and professional.
-- Never skip the classification step — it prevents hallucinated GCS paths.
-- If something is ambiguous (e.g., unclear whether a string is a GCS path
-  or a topic), ask for clarification rather than guessing.
+- Never skip or rush the confirmation step — good inputs produce great podcasts.
+- If something is ambiguous (e.g., a GCS path that might not exist), ask for
+  clarification rather than guessing.
     """,
     # sub_agents=[podcast_production_pipeline,],
-    tools=[podcast_production_pipeline_tool,],
+    tools=[podcast_production_pipeline_tool,], # running as a tool prevents sequential agent output
+)
+
+# ---------------------------------------------------------------------------
+# App — wires SaveFilesAsArtifactsPlugin so uploaded files are automatically
+# saved as ADK artifacts when they arrive. Name must match the agent directory
+# name ("root_agent") so adk web can locate sessions correctly.
+# ---------------------------------------------------------------------------
+app = App(
+    name="root_agent",
+    root_agent=root_agent,
+    plugins=[SaveFilesAsArtifactsPlugin()],
 )

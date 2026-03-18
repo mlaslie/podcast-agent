@@ -13,7 +13,6 @@
 #   .csv   → text/csv
 #   .json  → application/json
 
-import base64
 import json
 import logging
 import os
@@ -25,7 +24,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools import google_search
-from google.adk.tools import ToolContext
+from google.adk.tools import load_artifacts
 from google.adk.tools.agent_tool import AgentTool
 from google.genai import types
 
@@ -55,16 +54,6 @@ _EXT_TO_MIME: dict[str, str] = {
     ".html": "text/html",
     ".csv":  "text/csv",
     ".json": "application/json",
-}
-
-# Reverse mapping used by _save_uploads_as_artifacts to derive file extensions
-# from MIME types when naming artifacts.
-_MIME_TO_EXT: dict[str, str] = {
-    "application/pdf": ".pdf",
-    "text/plain":      ".txt",
-    "text/html":       ".html",
-    "text/csv":        ".csv",
-    "application/json": ".json",
 }
 
 # ---------------------------------------------------------------------------
@@ -138,122 +127,6 @@ def fetch_gcs_document(gcs_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Artifact Fetcher Function Tool
-# ---------------------------------------------------------------------------
-
-async def fetch_artifact(filename: str, tool_context: ToolContext) -> dict:
-    """
-    Loads a user-uploaded file from the ADK artifact store and returns its
-    content as base64.
-
-    Uploaded files are saved as artifacts by the _save_uploads_as_artifacts
-    before_agent_callback when the user's message arrives. This tool retrieves
-    them by name so the before_model_callback (_inject_gcs_parts) can inject
-    the bytes as a native types.Part.from_bytes() into the LLM request.
-
-    This is the Agent Engine-compatible replacement for fetch_uploaded_file,
-    which relied on local disk paths that do not exist in Agent Engine.
-
-    Supported formats: .pdf, .txt, .md, .html, .csv, .json
-
-    Args:
-        filename: The artifact filename as saved by _save_uploads_as_artifacts
-                  (e.g. "upload_0_report.pdf"). Use list_uploaded_files to
-                  discover available filenames.
-        tool_context: Injected automatically by ADK.
-
-    Returns:
-        A dict with keys:
-          - success    (bool)
-          - filename   (str)
-          - mime_type  (str)
-          - file_type  (str)
-          - data_b64   (str)   base64-encoded file bytes
-          - source     (str)   always "upload" — signals the callback to use
-                               Part.from_bytes() rather than Part.from_uri()
-          - error      (str)
-    """
-    try:
-        artifact_part = await tool_context.load_artifact(filename)
-
-        if artifact_part is None:
-            raise FileNotFoundError(
-                f"Artifact '{filename}' not found. "
-                "Ensure the file was uploaded in this session."
-            )
-
-        raw_bytes = artifact_part.inline_data.data
-        mime_type = artifact_part.inline_data.mime_type
-        ext       = os.path.splitext(filename)[1].lower()
-
-        data_b64 = base64.b64encode(raw_bytes).decode("utf-8")
-
-        logger.info(
-            "fetch_artifact: filename=%s mime_type=%s size=%d bytes",
-            filename, mime_type, len(raw_bytes),
-        )
-
-        return {
-            "success":   True,
-            "filename":  filename,
-            "mime_type": mime_type,
-            "file_type": ext,
-            "data_b64":  data_b64,
-            "source":    "upload",
-            "error":     "",
-        }
-
-    except Exception as exc:
-        logger.error("fetch_artifact failed for %s: %s", filename, exc)
-        return {
-            "success":   False,
-            "filename":  filename,
-            "mime_type": "",
-            "file_type": "",
-            "data_b64":  "",
-            "source":    "upload",
-            "error":     str(exc),
-        }
-
-
-async def list_uploaded_files(tool_context: ToolContext) -> dict:
-    """
-    Lists all uploaded files saved as artifacts in the current session.
-
-    Call this first when the user has uploaded files, to discover the
-    artifact filenames to pass to fetch_artifact.
-
-    Returns:
-        A dict with keys:
-          - success   (bool)
-          - filenames (list[str])  artifact filenames with "upload_" prefix
-          - count     (int)
-          - error     (str)
-    """
-    try:
-        all_artifacts = await tool_context.list_artifacts()
-        uploads = [f for f in (all_artifacts or []) if f.startswith("upload_")]
-
-        logger.info("list_uploaded_files: found %d upload artifact(s): %s", len(uploads), uploads)
-
-        return {
-            "success":   True,
-            "filenames": uploads,
-            "count":     len(uploads),
-            "error":     "",
-        }
-
-    except Exception as exc:
-        logger.error("list_uploaded_files failed: %s", exc)
-        return {
-            "success":   False,
-            "filenames": [],
-            "count":     0,
-            "error":     str(exc),
-        }
-
-
-# ---------------------------------------------------------------------------
 # Before-model callback — injects GCS file parts into the LLM request
 # ---------------------------------------------------------------------------
 
@@ -268,14 +141,13 @@ def _inject_gcs_parts(
     llm_request: LlmRequest,
 ) -> Optional[LlmResponse]:
     """
-    Converts fetch_gcs_document and fetch_uploaded_file tool results into
-    native Gemini file parts so the model reads file content directly.
+    Converts fetch_gcs_document tool results into native GCS file parts so
+    Gemini reads file content directly via gs:// URI.
 
-    - fetch_gcs_document results  → types.Part.from_uri(gcs_path, mime_type)
-    - fetch_uploaded_file results → types.Part.from_bytes(b64_decoded, mime_type)
+    - fetch_gcs_document results → types.Part.from_uri(gcs_path, mime_type)
 
-    No bytes pass through the agent process for GCS files; uploaded files are
-    decoded from the base64 payload returned by fetch_uploaded_file.
+    Uploaded files are handled separately by SaveFilesAsArtifactsPlugin +
+    the load_artifacts tool — no bytes pass through this callback for uploads.
     """
     import json as _json
 
@@ -306,28 +178,6 @@ def _inject_gcs_parts(
                                 text=(
                                     f"[File loaded natively from GCS: {filename} "
                                     f"({gcs_uri}, {mime_type}). Read it in full and "
-                                    "include all key points, figures, and details in "
-                                    "your research.]"
-                                )
-                            )
-                        )
-                        continue  # drop the raw JSON tool-result part
-
-                    # ── Uploaded file ──────────────────────────────────────
-                    if result.get("source") == "upload" and result.get("data_b64"):
-                        raw_bytes = base64.b64decode(result["data_b64"])
-                        logger.debug(
-                            "_inject_gcs_parts: injecting uploaded %s part for %s (%d bytes)",
-                            mime_type, filename, len(raw_bytes),
-                        )
-                        new_parts.append(
-                            types.Part.from_bytes(data=raw_bytes, mime_type=mime_type)
-                        )
-                        new_parts.append(
-                            types.Part.from_text(
-                                text=(
-                                    f"[Uploaded file loaded: {filename} "
-                                    f"({mime_type}). Read it in full and "
                                     "include all key points, figures, and details in "
                                     "your research.]"
                                 )
@@ -438,72 +288,6 @@ def list_gcs_folder(gcs_folder_path: str, max_files: int = 50) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Before-agent callback — saves inline upload blobs as ADK artifacts
-# ---------------------------------------------------------------------------
-
-async def _save_uploads_as_artifacts(callback_context: CallbackContext) -> None:
-    """
-    Scans every event in the current session for inline blob parts (i.e. files
-    the user uploaded through the Gemini Enterprise / Agent Engine UI) and saves
-    each one as a named ADK artifact so fetch_artifact can retrieve it by name.
-
-    Artifact naming convention: "upload_{index}_{original_filename}"
-    e.g. "upload_0_2025_tacoma_multimedia.pdf"
-
-    This runs once per agent invocation. Already-saved artifacts are skipped
-    (save_artifact creates a new version, so re-saving is harmless, but we
-    log a skip for clarity).
-
-    Why this is needed:
-        In Agent Engine / Gemini Enterprise, uploaded files arrive as
-        inline_data blobs inside the session's message history — there is no
-        filesystem path. This callback bridges that gap by persisting the blobs
-        into the ADK artifact store where tools can access them by name.
-    """
-    try:
-        existing = await callback_context.list_artifacts() or []
-        existing_set = set(existing)
-
-        upload_index = 0
-        for event in callback_context.session.events or []:
-            for part in (event.content.parts if event.content else []) or []:
-                if part.inline_data and part.inline_data.data:
-                    mime_type = part.inline_data.mime_type or "application/octet-stream"
-
-                    # Derive a clean filename from mime type if no name available
-                    ext = _MIME_TO_EXT.get(mime_type, ".bin")
-                    artifact_name = f"upload_{upload_index}{ext}"
-
-                    if artifact_name not in existing_set:
-                        artifact_part = types.Part(
-                            inline_data=types.Blob(
-                                data=part.inline_data.data,
-                                mime_type=mime_type,
-                            )
-                        )
-                        version = await callback_context.save_artifact(
-                            filename=artifact_name,
-                            artifact=artifact_part,
-                        )
-                        logger.info(
-                            "_save_uploads_as_artifacts: saved '%s' (mime=%s, %d bytes) as version %d",
-                            artifact_name, mime_type, len(part.inline_data.data), version,
-                        )
-                    else:
-                        logger.debug(
-                            "_save_uploads_as_artifacts: '%s' already exists, skipping",
-                            artifact_name,
-                        )
-
-                    upload_index += 1
-
-    except Exception as exc:
-        # Non-fatal — log and continue. Agent will still run; uploaded files
-        # simply won't be available via fetch_artifact.
-        logger.error("_save_uploads_as_artifacts failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
 # Google Search Sub-Agent | Used as AgentTool as Workaround
 # ---------------------------------------------------------------------------
 search_agent = Agent(
@@ -528,7 +312,6 @@ source_collector_agent = Agent(
         "Fetches and consolidates content from Google Cloud Storage "
         "paths, uploaded files, and free-form topics into a single research package."
     ),
-    before_agent_callback=_save_uploads_as_artifacts,
     before_model_callback=_inject_gcs_parts,
     instruction="""
     You are a research agent whose research will be used to generate
@@ -540,11 +323,21 @@ source_collector_agent = Agent(
     Supported file types in GCS and uploads: .pdf, .txt, .md, .html, .csv, .json.
     Any other file types in a folder will be automatically skipped.
 
+    When the user has uploaded files directly to the chat:
+      1. ALWAYS call load_artifacts first to load the uploaded file content
+         into your context. This is the ONLY way to read uploaded files —
+         do NOT infer, guess, or use the filename to determine content.
+      2. Read each loaded file in full.
+      3. For each file, produce a comprehensive overview covering ALL key
+         facts, figures, specs, model names, years, and details found in
+         the actual file content. Never substitute information from your
+         training data for what is in the file.
+
     When a GCS bucket or folder is provided:
       1. Call list_gcs_folder to enumerate all supported files in the folder.
       2. Call fetch_gcs_document for each file, one by one.
-         All file types — PDF and plain-text alike — are loaded natively
-         into your context via GCS URI. Read each file in full.
+         All file types are loaded natively into your context via GCS URI.
+         Read each file in full.
       3. For each document, produce a verbose and comprehensive overview
          covering key points, figures, quotes, and interesting details.
       4. Repeat until all files are processed.
@@ -553,18 +346,14 @@ source_collector_agent = Agent(
       1. Call fetch_gcs_document for the path.
       2. Read the file in full and produce a comprehensive overview.
 
-    When the user has uploaded files directly to the chat:
-      1. Call list_uploaded_files to discover available artifact filenames.
-      2. Call fetch_artifact for each filename returned, one by one.
-         File bytes are loaded directly into your context.
-      3. For each file, produce a verbose and comprehensive overview
-         covering key points, figures, quotes, and interesting details.
-      4. Repeat until all uploaded files are processed.
-
     When the request includes free-form text topics:
       - Use the search_agent tool to search Google for the topic and
         relevant adjacent subjects.
       - Produce a comprehensive and verbose overview of the findings.
+
+    CRITICAL: All facts, names, model numbers, years, and specifications in
+    your research output MUST come from the actual loaded file content or
+    search results — never from assumptions, filenames, or training data.
 
     Return all overviews combined as your output. This content will be
     consolidated and turned into a podcast script by another agent.
@@ -573,8 +362,7 @@ source_collector_agent = Agent(
         AgentTool(agent=search_agent),
         fetch_gcs_document,
         list_gcs_folder,
-        list_uploaded_files,
-        fetch_artifact,
+        load_artifacts,
     ],
     output_key="generated_research",
 )
