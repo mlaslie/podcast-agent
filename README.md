@@ -1,22 +1,33 @@
 # 🎙️ Podcast Agent
 
-An AI-powered podcast creation service built with [Google ADK](https://google.github.io/adk-docs/). Turns any source material — GCS documents, uploaded PDFs, or a free-form topic — into a professional, natural-sounding two-host podcast MP3 with dynamically generated album art and embedded ID3 tags.
+An AI-powered podcast creation service built with [Google ADK](https://google.github.io/adk-docs/). Turns any source material — GCS documents, uploaded PDFs, or a free-form topic — into a professional, natural-sounding podcast MP3 with dynamically generated album art and embedded ID3 tags.
 
-The agent pipeline handles everything: research → script writing → multi-speaker TTS audio production → album art generation → MP3 encoding.
+The agent pipeline handles everything: research → script writing → TTS audio production → album art generation → MP3 encoding. Supports both a two-host conversation format and a single-narrator educational format.
 
 ---
 
 ## Known Bugs
 
-- Sometimes TTS background text makes it into the podcast (rare)
 - Sometimes in GCS output mode, the wrong URL is given — file will still be in GCS
 
 ---
 
 ## Changelog
+### 20260322 — Solo narrator mode, date-grounded search
+
+#### Solo narrator mode
+- **New narrator mode selection** added to intake — choose between `1 narrator` (solo) or `2 hosts` (duo) at the start of each session
+- **Markup tags corrected** throughout to match the [Gemini TTS markup tag guide](https://docs.cloud.google.com/text-to-speech/docs/gemini-tts#markup_tag_guide):
+  - `[pause]` → `[short pause]` / `[medium pause]` / `[long pause]`
+  - `[laughs]` → `[laughing]`
+  - `[sighs]` → `[sigh]`
+
+#### Date-grounded search (fixes hallucination on time-relative topics)
+- **`source_collector_agent`** now computes `_TODAY_STR`, `_YEAR`, and `_MONTH_YEAR` at import time via `date.today()` and embeds them directly into both agent instructions
+
+---
 
 ### 20260319 — Gemini Enterprise support, album art, MP3 output
-
 - **`gemini_enterprise` flag** added to `agent_configuration.json`
   - When `true` (recommended for Gemini Enterprise / Agent Engine):
     - 🖼️ Album art JPEG saved as artifact — renders inline in chat
@@ -54,9 +65,9 @@ The agent pipeline handles everything: research → script writing → multi-spe
 User Input → Source Collector → Script Writer → Audio Producer → MP3 + Album Art
 ```
 
-1. **Source Collector** — fetches content from GCS files/folders, user-uploaded files, and/or searches the web for free-form topics
-2. **Script Writer** — transforms research into a natural two-host dialogue script
-3. **Audio Producer** — synthesises multi-speaker audio via Cloud TTS, generates episode-specific album art via Gemini image model, encodes to MP3 with embedded ID3 tags
+1. **Source Collector** — fetches content from GCS files/folders, user-uploaded files, and/or searches the web for free-form topics; date-grounded to prevent hallucination on time-relative queries
+2. **Script Writer** — transforms research into a natural script; solo mode produces an educational monologue, duo mode produces a two-host dialogue
+3. **Audio Producer** — synthesises audio via Cloud TTS (single-speaker or multi-speaker depending on mode), generates episode-specific album art via Gemini image model, encodes to MP3 with embedded ID3 tags
 
 ---
 
@@ -195,6 +206,7 @@ The orchestrator guides you through a short intake:
 
 | Field | Example |
 |---|---|
+| **Narrator Mode** | `1 narrator` (solo educational) · `2 hosts` (conversation) |
 | **Sources** | `gs://my-bucket/docs/` · `gs://my-bucket/report.pdf` · upload a PDF · `"the fall of the Roman Empire"` |
 | **Target Length** | `1-2 min` · `3-6 min` · `10-15 min` · `unlimited` |
 | **Target Audience** | `"software engineers new to ML"` |

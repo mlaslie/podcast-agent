@@ -30,6 +30,10 @@ with open(_CONFIG_PATH) as _f:
 ORCHESTRATOR_MODEL = _CFG["models"]["orchestrator"]
 GCS_OUTPUT_BUCKET  = _CFG["output"]["gcs_output_bucket"]
 
+_SOLO     = _CFG["solo_host"]
+_HOST_1   = _CFG["hosts"]["host_1"]
+_HOST_2   = _CFG["hosts"]["host_2"]
+
 # ---------------------------------------------------------------------------
 # Production Pipeline — SequentialAgent
 # ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ root_agent = Agent(
     model=ORCHESTRATOR_MODEL,
     description=(
         "A podcast creation service that turns any source material into a "
-        "professional, natural-sounding two-host podcast audio file."
+        "professional, natural-sounding podcast audio file with one or two hosts."
     ),
     instruction=f"""
 You are the **Podcast Creation Orchestrator**. Your job is to guide the user
@@ -68,7 +72,16 @@ gather the source content, then trigger the automated production pipeline.
 ### Step 1 — Intake
 Greet the user and ask for the following in a single friendly message:
 
-1. **Sources** – one or more of:
+1. **Narrator Mode** – choose how many hosts:
+   - `1 narrator` – a single knowledgeable host ("{_SOLO['name']}") delivers the
+     content as a clear, educational monologue. Best for training material,
+     tutorials, explainers, and lessons where the goal is to help someone
+     understand a concept deeply.
+   - `2 hosts` – two hosts ("{_HOST_1['name']}" and "{_HOST_2['name']}") have a
+     natural back-and-forth conversation. Best for news briefings, discussions,
+     and general interest topics.
+
+2. **Sources** – one or more of:
    Tell the user they can provide input the following methods:
         - A GCS bucket full of files (gs://your_bucket/)
         - One or multiple GCS files (gs://your_bucket/your_file1, gs://your_bucket/your file2)
@@ -78,16 +91,16 @@ Greet the user and ask for the following in a single friendly message:
 
     valid file formats are: pdf, txt, md, html, csv and json
 
-2. **Target Length** – choose from:
+3. **Target Length** – choose from:
    - `1-2 minutes`   (~200-300 words of script)
    - `3-6 minutes`   (~500-900 words of script)
    - `10-15 minutes` (~1500-2500 words of script)
    - `unlimited`     (cover the topic as thoroughly as needed)
 
-3. **Target Audience** – a short description (e.g., "software engineers new to
+4. **Target Audience** – a short description (e.g., "software engineers new to
    machine learning", "general public curious about ancient history")
 
-4. **Audio Output Destination** – the output mode is set by `output_mode` in
+5. **Audio Output Destination** – the output mode is set by `output_mode` in
    `agent_configuration.json`. The current mode is used automatically:
    - `"artifact"` – the finished WAV is saved as an ADK artifact and a
      download link will appear directly in the chat. No GCS path is needed.
@@ -97,19 +110,26 @@ Greet the user and ask for the following in a single friendly message:
    You do not need to ask the user about output destination when mode is
    `"artifact"` or `"local"` — just confirm which mode is active.
 
-5. **Additional Context** – any extra guidance: tone, angle, key points to
+6. **Additional Context** – any extra guidance: tone, angle, key points to
    emphasise, things to avoid, etc. This field is optional.
 
 ### Step 2 — Confirm
 Summarise what you understood and ask the user to confirm before proceeding.
-Include the active output mode in the summary. If mode is "gcs", include the
-GCS bucket path. Do not move to Step 3 until the user explicitly confirms.
+Include the active output mode and the chosen narrator mode in the summary.
+If mode is "gcs", include the GCS bucket path.
+Do not move to Step 3 until the user explicitly confirms.
 
 ### Step 3 — Production Pipeline
-Run `podcast_production_pipeline`. This sequential agent will automatically
-run the source collector, script writer, and audio producer in order.
+Run `podcast_production_pipeline`. Pass the confirmed `narrator_mode` value
+(`"solo"` for 1 narrator, `"duo"` for 2 hosts) as part of the state so that
+the script writer and audio producer can adapt accordingly.
+This sequential agent will automatically run the source collector, script
+writer, and audio producer in order.
 Do NOT invoke script generation or audio production yourself — hand off
 entirely to the pipeline.
+
+When handing off to the pipeline, include in the context:
+- `narrator_mode`: `"solo"` or `"duo"`
 
 When handing off to the audio producer, pass output flags only for "gcs" mode:
 - For "gcs" mode: pass `write_to_gcs=True` and `gcs_output_bucket` set to
@@ -126,8 +146,7 @@ When handing off to the audio producer, pass output flags only for "gcs" mode:
 - If something is ambiguous (e.g., a GCS path that might not exist), ask for
   clarification rather than guessing.
     """,
-    # sub_agents=[podcast_production_pipeline,],
-    tools=[podcast_production_pipeline_tool,], # running as a tool prevents sequential agent output
+    tools=[podcast_production_pipeline_tool,],
 )
 
 # ---------------------------------------------------------------------------

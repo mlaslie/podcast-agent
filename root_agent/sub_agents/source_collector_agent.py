@@ -16,6 +16,7 @@
 import json
 import logging
 import os
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -290,13 +291,50 @@ def list_gcs_folder(gcs_folder_path: str, max_files: int = 50) -> dict:
 # ---------------------------------------------------------------------------
 # Google Search Sub-Agent | Used as AgentTool as Workaround
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Current date — computed once at import time and embedded in instructions
+# so both the search agent and source collector are grounded to today.
+# ---------------------------------------------------------------------------
+_TODAY     = date.today()
+_TODAY_STR = _TODAY.strftime("%B %d, %Y")   # e.g. "March 22, 2026"
+_YEAR      = _TODAY.strftime("%Y")
+_MONTH_YEAR = _TODAY.strftime("%B %Y")
+
 search_agent = Agent(
     model=SEARCH_AGENT_MODEL,
     name="search_agent",
-    instruction="""
-    You're a specialist in Google Search.
+    instruction=f"""
+    You are a specialist Google Search researcher.
 
-    Provide a comprehensive overview of the topic to be searched.
+    ## Date Context
+    Today is {_TODAY_STR}. Use this date to correctly interpret any relative
+    time references in the research request (e.g. "last week", "this month",
+    "recent", "latest"). Always anchor search queries to real calendar dates
+    and never use training data for time-sensitive topics.
+
+    ## Your Process
+    1. Analyse the research request. Identify any time references and convert
+       them to explicit date ranges based on today's date:
+       - "last week"  → the 7-day window ending yesterday
+       - "this week"  → Monday through today
+       - "this month" → {_MONTH_YEAR}
+       - "recent" / "latest" → the past 7-14 days unless context suggests longer
+    2. Construct targeted search queries that include the explicit date range
+       or year (e.g. "top AI news {_YEAR}", "AI announcements {_MONTH_YEAR}").
+    3. Run MULTIPLE searches — at minimum one broad query and two to three
+       specific follow-up queries to capture the most important stories.
+    4. Cross-reference results: if a story appears in multiple sources, flag
+       it as higher-confidence. Note anything from only one source.
+    5. Produce a comprehensive, factual overview citing sources and dates
+       for every claim. Do NOT fill gaps with training data — if search
+       returns no results for a claim, say so explicitly.
+
+    ## Anti-Hallucination Rules
+    - NEVER report events, releases, or announcements that did not appear
+      in your actual search results for this session.
+    - If results are sparse or ambiguous, note the limitation rather than
+      supplementing with assumed knowledge.
+    - Always include the publication date of sources when available.
     """,
     tools=[google_search],
 )
@@ -313,12 +351,18 @@ source_collector_agent = Agent(
         "paths, uploaded files, and free-form topics into a single research package."
     ),
     before_model_callback=_inject_gcs_parts,
-    instruction="""
+    instruction=f"""
     You are a research agent whose research will be used to generate
     an insightful podcast. Your goal is to take the user-provided input
     of GCS bucket(s), GCS file(s), uploaded file(s), and/or free-form
     text about the podcast subject, and use your available tools to compose
     a very comprehensive research document as the output.
+
+    ## Date Context
+    Today is {_TODAY_STR}. Use this when interpreting any relative time
+    references (e.g. "last week", "recent", "latest") and pass this date
+    context explicitly when invoking the search_agent tool so it can
+    construct correctly date-bounded search queries.
 
     Supported file types in GCS and uploads: .pdf, .txt, .md, .html, .csv, .json.
     Any other file types in a folder will be automatically skipped.
@@ -347,13 +391,19 @@ source_collector_agent = Agent(
       2. Read the file in full and produce a comprehensive overview.
 
     When the request includes free-form text topics:
-      - Use the search_agent tool to search Google for the topic and
-        relevant adjacent subjects.
+      - Pass the full topic to the search_agent tool INCLUDING any time
+        references and today's date ({_TODAY_STR}) so the search agent
+        can construct correctly date-bounded queries.
+        Example: instead of passing "top AI news last week", pass
+        "top AI news from the week of [dates]. Today is {_TODAY_STR}."
+      - Run the search_agent at least twice for time-sensitive topics:
+        once for the broad topic and once for specific stories or follow-ups.
       - Produce a comprehensive and verbose overview of the findings.
 
     CRITICAL: All facts, names, model numbers, years, and specifications in
     your research output MUST come from the actual loaded file content or
     search results — never from assumptions, filenames, or training data.
+    If search results do not cover a claimed fact, omit it entirely.
 
     Return all overviews combined as your output. This content will be
     consolidated and turned into a podcast script by another agent.

@@ -1,6 +1,8 @@
 # audio_producer_agent.py
-# Converts a formatted two-host podcast script into audio using Gemini TTS via
-# the Cloud Text-to-Speech client with MultiSpeakerMarkup structured turns.
+# Converts a formatted podcast script into audio using Gemini TTS.
+# Supports two narrator modes controlled by the `narrator_mode` state key:
+#   "duo"  (default) — two-host MultiSpeakerMarkup TTS (Alex & Jordan)
+#   "solo"           — single-voice TTS (Alex only)
 #
 # Output behaviour is controlled by two config flags:
 #
@@ -54,8 +56,9 @@ AUDIO_PRODUCER_MODEL = _CFG["models"]["audio_producer"]
 # Podcast Speaker Setup
 # ---------------------------------------------------------------------------
 
-HOST_1 = _CFG["hosts"]["host_1"]
-HOST_2 = _CFG["hosts"]["host_2"]
+HOST_1      = _CFG["hosts"]["host_1"]
+HOST_2      = _CFG["hosts"]["host_2"]
+SOLO_HOST   = _CFG["solo_host"]
 
 # FLATTENED DESCRIPTIONS: Removed markdown and line breaks to prevent TTS read-aloud
 ALEX_DESCRIPTION = (
@@ -66,6 +69,11 @@ ALEX_DESCRIPTION = (
 JORDAN_DESCRIPTION = (
     f"{HOST_2['name']} is the expert host. Personality: {HOST_2['description']}. "
     "Voice: Calm authority with occasional dry wit. Brings data and history, and sometimes pauses to think."
+)
+
+SOLO_DESCRIPTION = (
+    f"{SOLO_HOST['name']} is a knowledgeable narrator. Personality: {SOLO_HOST['description']}. "
+    "Voice: Clear, warm, and authoritative. Guides the listener through concepts step by step."
 )
 
 # ---------------------------------------------------------------------------
@@ -125,6 +133,7 @@ def _build_director_notes(
     style_guidance: Optional[str],
     chunk_index: int,
     total_chunks: int,
+    narrator_mode: str = "duo",
 ) -> str:
     """
     Builds the Director's Notes prompt passed as the `prompt` field of
@@ -140,41 +149,58 @@ def _build_director_notes(
         else:
             continuation_note = (
                 f"This is segment {chunk_index + 1} of {total_chunks}. "
+                "The narrator is mid-explanation." if narrator_mode == "solo"
+                else f"This is segment {chunk_index + 1} of {total_chunks}. "
                 "The hosts are mid-discussion."
             )
 
     extra_style = f"Additional style guidance: {style_guidance}. " if style_guidance else ""
 
-    return (
-        f"System Instructions (Do not read aloud): You are producing a podcast episode titled '{podcast_title}'. "
-        f"The scene is a modern podcast studio where two knowledgeable hosts are having a focused but relaxed conversation. "
-        f"{continuation_note} "
-        f"{ALEX_DESCRIPTION} "
-        f"{JORDAN_DESCRIPTION} "
-        f"Delivery rules: Both hosts must sound completely natural and conversational. "
-        f"Perform inline markers: [pause] as a brief thinking pause, [laughs] as a light laugh, and [sighs] as an exhale. "
-        f"Use natural hesitations and contractions. The pace should be 130 to 150 words per minute. "
-        f"{extra_style}"
-        f"CRITICAL: These are backend director notes. Absolutely no part of this text should be spoken aloud."
-    )
+    if narrator_mode == "solo":
+        scene = (
+            f"System Instructions (Do not read aloud): You are producing an educational podcast episode titled '{podcast_title}'. "
+            f"The scene is a professional recording studio where a single knowledgeable narrator is delivering a clear, engaging lesson. "
+            f"{continuation_note} "
+            f"{SOLO_DESCRIPTION} "
+            f"Delivery rules: The narrator must sound natural, warm, and authoritative — like a trusted expert speaking directly to the listener. "
+            f"Perform inline markers: [short pause]/[medium pause]/[long pause] for pauses of increasing length, [laughing] as a light laugh, and [sigh] as a thoughtful exhale. "
+            f"Use natural hesitations and contractions. The pace should be 120 to 140 words per minute, slightly slower than a conversation to aid comprehension. "
+            f"{extra_style}"
+            f"CRITICAL: These are backend director notes. Absolutely no part of this text should be spoken aloud."
+        )
+    else:
+        scene = (
+            f"System Instructions (Do not read aloud): You are producing a podcast episode titled '{podcast_title}'. "
+            f"The scene is a modern podcast studio where two knowledgeable hosts are having a focused but relaxed conversation. "
+            f"{continuation_note} "
+            f"{ALEX_DESCRIPTION} "
+            f"{JORDAN_DESCRIPTION} "
+            f"Delivery rules: Both hosts must sound completely natural and conversational. "
+            f"Perform inline markers: [short pause]/[medium pause]/[long pause] for pauses of increasing length, [laughing] as a light laugh, and [sigh] as an exhale. "
+            f"Use natural hesitations and contractions. The pace should be 130 to 150 words per minute. "
+            f"{extra_style}"
+            f"CRITICAL: These are backend director notes. Absolutely no part of this text should be spoken aloud."
+        )
+
+    return scene
 
 
 # ---------------------------------------------------------------------------
-# Script Parser — text → structured Turn list
+# Script Parser — text → structured Turn list (duo mode)
 # ---------------------------------------------------------------------------
 
-def _parse_script_to_turns(
+def _parse_script_to_turns_duo(
     script: str,
 ) -> list[texttospeech.MultiSpeakerMarkup.Turn]:
     """
-    Parses a formatted script into a list of MultiSpeakerMarkup.Turn objects.
+    Parses a two-host formatted script into MultiSpeakerMarkup.Turn objects.
 
     Expects lines in the form:
         Alex: Some dialogue here...
         Jordan: Response here...
 
     Consecutive lines by the same speaker are merged into a single turn.
-    Inline stage markers ([pause], [laughs], [sighs]) are preserved.
+    Inline stage markers ([short pause], [medium pause], [long pause], [laughing], [sigh], [uhm]) are preserved.
     """
     host_names = {HOST_1["name"], HOST_2["name"]}
     turn_pattern = re.compile(
@@ -201,15 +227,53 @@ def _parse_script_to_turns(
     if not turns:
         raise ValueError(
             "No speaker turns found in script. "
-            f"Expected lines starting with '{HOST_1['name']}:' or '{HOST_2['name']}:'."
+            f"Expected lines starting with '{HOST_1['name']}:' or '{HOST_2['name']}'."
         )
 
-    logger.info("Parsed %d speaker turns from script.", len(turns))
+    logger.info("Parsed %d speaker turns from script (duo mode).", len(turns))
     return turns
 
 
 # ---------------------------------------------------------------------------
-# Turn-based Chunking
+# Script Parser — text → plain text paragraphs (solo mode)
+# ---------------------------------------------------------------------------
+
+def _parse_script_to_paragraphs_solo(script: str) -> list[str]:
+    """
+    Parses a solo-narrator script into a list of plain text paragraphs,
+    stripping the leading speaker label (e.g. "Alex: ") from each line.
+
+    Each paragraph becomes a separate TTS synthesis unit so chunks can
+    still be split at natural boundaries.
+    """
+    speaker_name = SOLO_HOST["name"]
+    label_pattern = re.compile(
+        r"^" + re.escape(speaker_name) + r":\s*",
+        re.MULTILINE,
+    )
+
+    paragraphs = []
+    for line in script.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Strip the "Alex: " prefix if present; keep the rest
+        text = label_pattern.sub("", line).strip()
+        if text:
+            paragraphs.append(text)
+
+    if not paragraphs:
+        raise ValueError(
+            "No narrator paragraphs found in solo script. "
+            f"Expected lines starting with '{speaker_name}:'."
+        )
+
+    logger.info("Parsed %d paragraphs from script (solo mode).", len(paragraphs))
+    return paragraphs
+
+
+# ---------------------------------------------------------------------------
+# Turn-based Chunking (duo mode)
 # ---------------------------------------------------------------------------
 
 def _chunk_turns(
@@ -242,8 +306,48 @@ def _chunk_turns(
         chunks.append(current)
 
     logger.info(
-        "Split %d turns into %d chunk(s) (total ~%d words)",
+        "Split %d turns into %d chunk(s) (total ~%d words, duo mode)",
         len(turns), len(chunks), total_words,
+    )
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Paragraph-based Chunking (solo mode)
+# ---------------------------------------------------------------------------
+
+def _chunk_paragraphs(
+    paragraphs: list[str],
+    target_words: int,
+) -> list[str]:
+    """
+    Joins paragraphs into chunks of approximately target_words each.
+    Returns a list of text strings, one per TTS call.
+    """
+    total_words = sum(len(p.split()) for p in paragraphs)
+    if total_words <= target_words:
+        return [" ".join(paragraphs)]
+
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    current_words = 0
+
+    for para in paragraphs:
+        para_words = len(para.split())
+        if current_words + para_words > target_words and current_parts:
+            chunks.append(" ".join(current_parts))
+            current_parts = [para]
+            current_words = para_words
+        else:
+            current_parts.append(para)
+            current_words += para_words
+
+    if current_parts:
+        chunks.append(" ".join(current_parts))
+
+    logger.info(
+        "Split %d paragraphs into %d chunk(s) (total ~%d words, solo mode)",
+        len(paragraphs), len(chunks), total_words,
     )
     return chunks
 
@@ -361,13 +465,11 @@ def _build_mp3_bytes(
     pcm_data: bytes,
     podcast_title: str,
     album_art_jpeg: Optional[bytes],
+    narrator_mode: str = "duo",
 ) -> bytes:
     """
     Encodes raw 16-bit PCM to MP3 via lameenc, then writes ID3v2.3 tags
     (including the APIC cover art frame) using mutagen.
-
-    mutagen pattern: encode → wrap MP3 in BytesIO → save ID3 into that
-    BytesIO (prepends header in-place) → return buffer contents.
     """
     encoder = lameenc.Encoder()
     encoder.set_bit_rate(MP3_BITRATE)
@@ -390,9 +492,15 @@ def _build_mp3_bytes(
     except ID3NoHeaderError:
         tags = ID3()
 
+    # Artist tag reflects narrator mode
+    if narrator_mode == "solo":
+        artist_tag = SOLO_HOST["name"]
+    else:
+        artist_tag = f"{HOST_1['name']} & {HOST_2['name']}"
+
     tags.add(TIT2(encoding=3, text=podcast_title))
     tags.add(TALB(encoding=3, text=SHOW_NAME))
-    tags.add(TPE1(encoding=3, text=f"{HOST_1['name']} & {HOST_2['name']}"))
+    tags.add(TPE1(encoding=3, text=artist_tag))
     tags.add(TCON(encoding=3, text="Podcast"))
     tags.add(TDRC(encoding=3, text=datetime.now().strftime("%Y")))
 
@@ -424,6 +532,7 @@ def _build_mp3_bytes(
 async def generate_podcast_audio(
     script: str,
     podcast_title: str,
+    narrator_mode: str = "duo",
     topic_summary: str = "",
     key_themes: str = "",
     target_audience: str = "",
@@ -434,27 +543,19 @@ async def generate_podcast_audio(
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
     """
-    Converts a formatted two-host podcast script to audio with album art.
+    Converts a formatted podcast script to audio with album art.
+
+    Supports two narrator modes:
+      narrator_mode = "solo"  — single-voice TTS using SOLO_HOST config
+      narrator_mode = "duo"   — two-host MultiSpeakerMarkup TTS (default)
 
     Output behaviour is controlled by output_mode + gemini_enterprise in
-    agent_configuration.json:
-
-      gemini_enterprise: true  (Gemini Enterprise / Agent Engine consumption)
-        → JPEG artifact    — album art renders inline in chat
-        → WAV artifact     — plays directly in the Gemini Enterprise browser UI
-        → MP3 → GCS        — tagged MP3 (art + title) uploaded to GCS for
-                             personal player download; gcs_output_bucket required
-
-      gemini_enterprise: false  (default)
-        → JPEG artifact    — album art renders inline in chat
-        → MP3 artifact     — tagged MP3 downloadable from chat
-
-      output_mode: "gcs"    — MP3 only, uploaded to GCS (no artifact)
-      output_mode: "local"  — MP3 only, written to local disk
+    agent_configuration.json.
 
     Args:
         script:            Formatted script with speaker labels.
         podcast_title:     Episode title — filename, ID3 TIT2, and art text.
+        narrator_mode:     "solo" for single narrator, "duo" for two hosts.
         topic_summary:     One-sentence summary for the art prompt.
         key_themes:        Comma-separated keywords for the art prompt.
         target_audience:   Audience description for art tone/style.
@@ -468,7 +569,7 @@ async def generate_podcast_audio(
         dict with: success, output_path, output_url, mp3_gcs_url,
         artifact_saved, wav_artifact_saved, art_artifact_saved,
         art_filename, duration_seconds, duration_minutes,
-        chunks_processed, model_used, error.
+        chunks_processed, model_used, narrator_mode, error.
     """
     try:
         safe_title       = re.sub(r"[^\w\-_]", "_", podcast_title)[:50]
@@ -477,67 +578,130 @@ async def generate_podcast_audio(
         wav_filename     = f"{safe_title}_{timestamp}.wav"
         art_filename     = f"{safe_title}_{timestamp}_cover.jpg"
 
-        # -- 1. Parse script into structured turns ---------------------------
-        all_turns = _parse_script_to_turns(script)
+        narrator_mode = (narrator_mode or "duo").lower().strip()
+        is_solo = narrator_mode == "solo"
 
-        # -- 2. Split into chunks at turn boundaries -------------------------
-        turn_chunks = _chunk_turns(all_turns, CHUNK_TARGET_WORDS)
         logger.info(
-            "Processing %d TTS chunk(s) for '%s'", len(turn_chunks), podcast_title
+            "generate_podcast_audio: narrator_mode=%s title='%s'",
+            narrator_mode, podcast_title,
         )
 
-        # -- 3. Voice configuration ------------------------------------------
-        voice = texttospeech.VoiceSelectionParams(
-            language_code="en-US",
-            model_name=_TTS_API_MODEL,
-            multi_speaker_voice_config=texttospeech.MultiSpeakerVoiceConfig(
-                speaker_voice_configs=[
-                    texttospeech.MultispeakerPrebuiltVoice(
-                        speaker_alias=HOST_1["name"],
-                        speaker_id=HOST_1["voice"],
-                    ),
-                    texttospeech.MultispeakerPrebuiltVoice(
-                        speaker_alias=HOST_2["name"],
-                        speaker_id=HOST_2["voice"],
-                    ),
-                ]
-            ),
-        )
-
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-            sample_rate_hertz=AUDIO_SAMPLE_RATE,
-        )
-
-        # -- 4. Synthesise each chunk ----------------------------------------
         all_audio_frames: list[bytes] = []
         chunks_processed = 0
 
-        for i, turns in enumerate(turn_chunks):
-            logger.info("  Generating audio for chunk %d/%d...", i + 1, len(turn_chunks))
+        # ── SOLO MODE ────────────────────────────────────────────────────────
+        if is_solo:
+            paragraphs   = _parse_script_to_paragraphs_solo(script)
+            text_chunks  = _chunk_paragraphs(paragraphs, CHUNK_TARGET_WORDS)
 
-            director_notes = _build_director_notes(
-                podcast_title=podcast_title,
-                style_guidance=style_guidance,
-                chunk_index=i,
-                total_chunks=len(turn_chunks),
+            logger.info(
+                "Processing %d TTS chunk(s) for '%s' (solo mode)",
+                len(text_chunks), podcast_title,
             )
 
-            synthesis_input = texttospeech.SynthesisInput(
-                multi_speaker_markup=texttospeech.MultiSpeakerMarkup(turns=turns),
-                prompt=director_notes,
+            # Gemini TTS single-speaker — uses name= + model_name= on
+            # VoiceSelectionParams (no MultiSpeakerVoiceConfig needed).
+            # The prompt field IS supported for single-speaker Gemini TTS,
+            # so we pass director notes for style/pacing control.
+            voice = texttospeech.VoiceSelectionParams(
+                language_code="en-US",
+                name=SOLO_HOST["voice"],
+                model_name=_TTS_API_MODEL,
+            )
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                sample_rate_hertz=AUDIO_SAMPLE_RATE,
             )
 
-            response = tts_client.synthesize_speech(
-                input=synthesis_input,
-                voice=voice,
-                audio_config=audio_config,
+            for i, text_chunk in enumerate(text_chunks):
+                logger.info(
+                    "  Generating audio for chunk %d/%d (solo)...",
+                    i + 1, len(text_chunks),
+                )
+
+                director_notes = _build_director_notes(
+                    podcast_title=podcast_title,
+                    style_guidance=style_guidance,
+                    chunk_index=i,
+                    total_chunks=len(text_chunks),
+                    narrator_mode="solo",
+                )
+
+                synthesis_input = texttospeech.SynthesisInput(
+                    text=text_chunk,
+                    prompt=director_notes,
+                )
+
+                response = tts_client.synthesize_speech(
+                    input=synthesis_input,
+                    voice=voice,
+                    audio_config=audio_config,
+                )
+
+                all_audio_frames.append(response.audio_content)
+                chunks_processed += 1
+
+        # ── DUO MODE ─────────────────────────────────────────────────────────
+        else:
+            all_turns   = _parse_script_to_turns_duo(script)
+            turn_chunks = _chunk_turns(all_turns, CHUNK_TARGET_WORDS)
+
+            logger.info(
+                "Processing %d TTS chunk(s) for '%s' (duo mode)",
+                len(turn_chunks), podcast_title,
             )
 
-            all_audio_frames.append(response.audio_content)
-            chunks_processed += 1
+            voice = texttospeech.VoiceSelectionParams(
+                language_code="en-US",
+                model_name=_TTS_API_MODEL,
+                multi_speaker_voice_config=texttospeech.MultiSpeakerVoiceConfig(
+                    speaker_voice_configs=[
+                        texttospeech.MultispeakerPrebuiltVoice(
+                            speaker_alias=HOST_1["name"],
+                            speaker_id=HOST_1["voice"],
+                        ),
+                        texttospeech.MultispeakerPrebuiltVoice(
+                            speaker_alias=HOST_2["name"],
+                            speaker_id=HOST_2["voice"],
+                        ),
+                    ]
+                ),
+            )
 
-        # -- 5. Assemble PCM, generate art, build WAV + MP3 ------------------
+            audio_config = texttospeech.AudioConfig(
+                audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+                sample_rate_hertz=AUDIO_SAMPLE_RATE,
+            )
+
+            for i, turns in enumerate(turn_chunks):
+                logger.info(
+                    "  Generating audio for chunk %d/%d (duo)...",
+                    i + 1, len(turn_chunks),
+                )
+
+                director_notes = _build_director_notes(
+                    podcast_title=podcast_title,
+                    style_guidance=style_guidance,
+                    chunk_index=i,
+                    total_chunks=len(turn_chunks),
+                    narrator_mode="duo",
+                )
+
+                synthesis_input = texttospeech.SynthesisInput(
+                    multi_speaker_markup=texttospeech.MultiSpeakerMarkup(turns=turns),
+                    prompt=director_notes,
+                )
+
+                response = tts_client.synthesize_speech(
+                    input=synthesis_input,
+                    voice=voice,
+                    audio_config=audio_config,
+                )
+
+                all_audio_frames.append(response.audio_content)
+                chunks_processed += 1
+
+        # -- Assemble PCM, generate art, build WAV + MP3 ---------------------
         combined_pcm = b"".join(all_audio_frames)
 
         bytes_per_second = AUDIO_SAMPLE_RATE * AUDIO_CHANNELS * AUDIO_SAMPLE_WIDTH
@@ -556,11 +720,12 @@ async def generate_podcast_audio(
             pcm_data=combined_pcm,
             podcast_title=podcast_title,
             album_art_jpeg=album_art_jpeg,
+            narrator_mode=narrator_mode,
         )
 
         wav_bytes = _build_wav_bytes(combined_pcm)
 
-        # -- 6. Output routing -----------------------------------------------
+        # -- Output routing --------------------------------------------------
         effective_mode = OUTPUT_MODE
         if write_to_gcs and effective_mode not in ("artifact", "gcs"):
             effective_mode = "gcs"
@@ -577,7 +742,6 @@ async def generate_podcast_audio(
                     "Ensure the Runner is configured with an ArtifactService."
                 )
 
-            # Always save album art as JPEG artifact (renders inline in chat)
             if album_art_jpeg:
                 art_part = types.Part(
                     inline_data=types.Blob(data=album_art_jpeg, mime_type="image/jpeg")
@@ -587,8 +751,6 @@ async def generate_podcast_audio(
                 logger.info("Album art saved as artifact '%s'", art_filename)
 
             if GEMINI_ENTERPRISE:
-                # Gemini Enterprise: WAV artifact (in-browser playback) +
-                #                    MP3 to GCS (personal player download)
                 bucket = (gcs_output_bucket or GCS_OUTPUT_BUCKET)
                 if not bucket:
                     raise RuntimeError(
@@ -597,7 +759,6 @@ async def generate_podcast_audio(
                     )
                 bucket = bucket.rstrip("/")
 
-                # WAV → artifact
                 wav_part = types.Part(
                     inline_data=types.Blob(data=wav_bytes, mime_type="audio/wav")
                 )
@@ -610,7 +771,6 @@ async def generate_podcast_audio(
                     wav_filename, wav_version, duration_seconds / 60,
                 )
 
-                # MP3 → GCS
                 mp3_gcs_path = f"{bucket}/{mp3_filename}"
                 mp3_gcs_url  = _upload_to_gcs(mp3_gcs_path, mp3_bytes, "audio/mpeg")
                 logger.info("MP3 uploaded to GCS: %s", mp3_gcs_path)
@@ -628,11 +788,11 @@ async def generate_podcast_audio(
                     "duration_minutes":   round(duration_seconds / 60, 1),
                     "chunks_processed":   chunks_processed,
                     "model_used":         _TTS_API_MODEL,
+                    "narrator_mode":      narrator_mode,
                     "error":              "",
                 }
 
             else:
-                # Standard artifact mode: MP3 artifact + JPEG artifact
                 mp3_part = types.Part(
                     inline_data=types.Blob(data=mp3_bytes, mime_type="audio/mpeg")
                 )
@@ -657,6 +817,7 @@ async def generate_podcast_audio(
                     "duration_minutes":   round(duration_seconds / 60, 1),
                     "chunks_processed":   chunks_processed,
                     "model_used":         _TTS_API_MODEL,
+                    "narrator_mode":      narrator_mode,
                     "error":              "",
                 }
 
@@ -679,6 +840,7 @@ async def generate_podcast_audio(
                 "duration_minutes":   round(duration_seconds / 60, 1),
                 "chunks_processed":   chunks_processed,
                 "model_used":         _TTS_API_MODEL,
+                "narrator_mode":      narrator_mode,
                 "error":              "",
             }
 
@@ -704,6 +866,7 @@ async def generate_podcast_audio(
                 "duration_minutes":   round(duration_seconds / 60, 1),
                 "chunks_processed":   chunks_processed,
                 "model_used":         _TTS_API_MODEL,
+                "narrator_mode":      narrator_mode,
                 "error":              "",
             }
 
@@ -722,6 +885,7 @@ async def generate_podcast_audio(
             "duration_minutes":   0,
             "chunks_processed":   0,
             "model_used":         "",
+            "narrator_mode":      narrator_mode if "narrator_mode" in dir() else "unknown",
             "error":              str(exc),
         }
 
@@ -735,8 +899,9 @@ audio_producer_agent = Agent(
     model=AUDIO_PRODUCER_MODEL,
     description=(
         "Converts a formatted podcast script into audio with dynamically "
-        "generated album art and embedded ID3 tags. Output format depends on "
-        "the gemini_enterprise flag in agent_configuration.json."
+        "generated album art and embedded ID3 tags. Supports solo narrator "
+        "and two-host duo modes. Output format depends on the gemini_enterprise "
+        "flag in agent_configuration.json."
     ),
     instruction="""
 You are the **Audio Producer** agent. Your sole responsibility is to take a
@@ -745,8 +910,9 @@ with dynamically generated album art.
 
 ## Your Process
 
-1. Receive the formatted script below and analyse it:
-    {base_script}
+1. Receive the formatted script and narrator mode:
+    Script: {base_script}
+    Narrator Mode: {narrator_mode:duo}
 
 2. Extract the following from the script content:
    - **Episode title** – punchy and engaging (5 words max if possible)
@@ -756,6 +922,7 @@ with dynamically generated album art.
 
 3. Call `generate_podcast_audio` with:
    - `script`, `podcast_title`, `topic_summary`, `key_themes`, `target_audience`
+   - `narrator_mode` — pass through exactly as received (`"solo"` or `"duo"`)
    - `style_guidance` — optional tone notes
    - For "gcs" mode only: `write_to_gcs=True` and optionally `gcs_output_bucket`
 
@@ -784,7 +951,7 @@ After calling the tool, return in this exact markdown format:
 [If `output_url` is non-empty and no artifacts:
   Provide it as a clickable GCS URL.]
 
-If the tool returns an error, report it clearly with suggestions.
+If the tool returns an error, report it clearly with suggestions and DO NOT retry — stop immediately and explain the issue to the user.
 """,
     tools=[generate_podcast_audio],
     output_key="final_output",

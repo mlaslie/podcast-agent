@@ -1,5 +1,5 @@
 {
-    "_comment": "Podcast Agent Configuration — replace YOUR_GCP_PROJECT_ID and YOUR_GCS_BUCKET with your values. All other defaults are ready to use.",
+    "_comment": "Podcast Agent Configuration — edit this file to change models, voices, and output settings.",
 
     "vertex_ai": {
         "project":  "YOUR_GCP_PROJECT_ID",
@@ -29,6 +29,12 @@
         }
     },
 
+    "solo_host": {
+        "name":        "Alex",
+        "voice":       "Enceladus",
+        "description": "clear, authoritative, and engaging educator who explains concepts step by step"
+    },
+
     "audio": {
         "sample_rate":        24000,
         "channels":           1,
@@ -38,23 +44,19 @@
     },
 
     "podcast": {
-        "show_name":   "The Briefing",
-        "mp3_bitrate": 128
+        "show_name":    "The Briefing",
+        "mp3_bitrate":  128
     },
 
     "album_art": {
-        "enabled":      true,
-        "image_size":   "1K",
-        "aspect_ratio": "1:1"
+        "enabled":        true,
+        "image_size":     "1K",
+        "aspect_ratio":   "1:1"
     },
 
     "output": {
-        "_comment_gemini_enterprise": "Set to true when consuming via Gemini Enterprise / Agent Engine. Produces WAV artifact (in-browser playback) + MP3 to GCS (personal player download). Requires gcs_output_bucket. Set to false for standard adk web / API usage (MP3 artifact only).",
         "gemini_enterprise":  true,
-
-        "_comment_output_mode": "artifact = deliver outputs via ADK artifacts (required for gemini_enterprise). gcs = MP3 to GCS only. local = MP3 to local disk (dev only).",
         "output_mode":        "artifact",
-
         "local_output_dir":   "output",
         "gcs_output_bucket":  "gs://YOUR_GCS_BUCKET"
     }
