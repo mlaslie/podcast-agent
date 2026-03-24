@@ -22,7 +22,7 @@ from .sub_agents.audio_producer_agent import audio_producer_agent
 # ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
-THIS_VERSION = "version_20260324-1040"
+THIS_VERSION = "version_20260324-1115"
 
 # ---------------------------------------------------------------------------
 # Load Configuration
@@ -272,6 +272,10 @@ When handing off to the audio producer, pass output flags only for "gcs" mode:
 - For "artifact" or "local" mode: no output flags are needed.
 
 ### Step 4 — Respond to the User
+Make sure to include the following in the final response to the user:
+ - include the .wav podcast artifact
+ - include the .jpg album art artifact
+ - include the .mp3 download link (specifically the `mp3_gcs_url`)
 
 --
 
