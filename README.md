@@ -6,17 +6,35 @@ The agent pipeline handles everything: research → script writing → TTS audio
 
 ---
 
-## Known Bugs
+## Changelog
 
-- Sometimes in GCS output mode, the wrong URL is given — file will still be in GCS
+### version_20260326-2218 — Long-form podcast fix, improved intake UX
+
+#### Long-form podcast audio fix
+- **Reverted TTS to Cloud Text-to-Speech unary API** (`synthesize_speech`) after the genai SDK Vertex AI path proved incompatible with reliable multi-chunk synthesis:
+
+- **Fixed director notes being read aloud** — the `prompt` field in `SynthesisInput` was set to a 187-word LLM-style system prompt. The Cloud TTS `prompt` field expects a short style instruction (5–15 words per the docs examples). Replaced with concise prompts: *"Narrate the following as a knowledgeable, warm educator..."*
+
+
+- **`chunk_target_words` in `agent_configuration.json`**: `1000` → `600`
+
+#### Intake UX improvements
+- **Redesigned welcome message** — replaced the numbered list with ranges and caveats with a clean, emoji-anchored single-message intake covering all five fields (speakers, sources, length, audience, additional context)
+- Target length is now free-form (e.g. "3 minutes", "10 minutes") rather than fixed ranges, with a note that length is approximate
+- Agent now asks targeted follow-up questions for ambiguous fields rather than repeating the full intake form
+- Added version to header
 
 ---
 
-## Changelog
 ### 20260322 — Solo narrator mode, date-grounded search
 
 #### Solo narrator mode
 - **New narrator mode selection** added to intake — choose between `1 narrator` (solo) or `2 hosts` (duo) at the start of each session
+- **`solo_host` block** added to `agent_configuration.json` with `name`, `voice`, and `description` fields
+- **`script_writer_agent`** now branches on `narrator_mode` state variable:
+  - `solo` — single-narrator educational monologue with a structured arc: Hook → Context → Core Explanation → Misconceptions → Takeaway → Sign-off
+  - `duo` — existing two-host conversation format, unchanged
+- **`audio_producer_agent`** solo TTS path uses single-speaker Cloud TTS with `name=` + `model_name=` and the `prompt` field for director notes
 - **Markup tags corrected** throughout to match the [Gemini TTS markup tag guide](https://docs.cloud.google.com/text-to-speech/docs/gemini-tts#markup_tag_guide):
   - `[pause]` → `[short pause]` / `[medium pause]` / `[long pause]`
   - `[laughs]` → `[laughing]`
@@ -24,6 +42,7 @@ The agent pipeline handles everything: research → script writing → TTS audio
 
 #### Date-grounded search (fixes hallucination on time-relative topics)
 - **`source_collector_agent`** now computes `_TODAY_STR`, `_YEAR`, and `_MONTH_YEAR` at import time via `date.today()` and embeds them directly into both agent instructions
+- **`search_agent`** instruction rewritten with explicit date-awareness, multi-query enforcement, and anti-hallucination rules
 
 ---
 
@@ -202,14 +221,14 @@ Deploy via `vertexai.agent_engines` and connect through the Gemini Enterprise in
 
 ## Usage
 
-The orchestrator guides you through a short intake:
+The agent greets you with a single intake message covering all required fields:
 
 | Field | Example |
 |---|---|
-| **Narrator Mode** | `1 narrator` (solo educational) · `2 hosts` (conversation) |
-| **Sources** | `gs://my-bucket/docs/` · `gs://my-bucket/report.pdf` · upload a PDF · `"the fall of the Roman Empire"` |
-| **Target Length** | `1-2 min` · `3-6 min` · `10-15 min` · `unlimited` |
-| **Target Audience** | `"software engineers new to ML"` |
-| **Additional Context** | Tone, key points to cover, things to avoid _(optional)_ |
+| **Speakers** | `1 speaker` (solo educational) · `2 speakers` (conversation) |
+| **Sources** | `gs://my-bucket/docs/` · `gs://my-bucket/report.pdf` · upload a file · describe a topic for Google Search |
+| **Target Length** | `3 minutes` · `10 minutes` *(approximate)* |
+| **Target Audience** | `software developer` · `high school student` · `general public` |
+| **Additional Context** | Areas to focus on, angles to take, or topics to avoid *(optional)* |
 
 Confirm when prompted. In Gemini Enterprise mode you'll receive the album art inline in chat, a playable WAV in the browser, and a GCS download link for the tagged MP3.

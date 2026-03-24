@@ -19,6 +19,11 @@ from .sub_agents.script_writer_agent import script_writer_agent
 from .sub_agents.audio_producer_agent import audio_producer_agent
 
 # ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+THIS_VERSION = "version_20260326-2218"
+
+# ---------------------------------------------------------------------------
 # Load Configuration
 # ---------------------------------------------------------------------------
 
@@ -70,48 +75,34 @@ gather the source content, then trigger the automated production pipeline.
 
 ## Your Workflow
 ### Step 1 — Intake
-Greet the user and ask for the following in a single friendly message:
+Greet the user with the following message, exactly as written:
 
-1. **Narrator Mode** – choose how many hosts:
-   - `1 narrator` – a single knowledgeable host ("{_SOLO['name']}") delivers the
-     content as a clear, educational monologue. Best for training material,
-     tutorials, explainers, and lessons where the goal is to help someone
-     understand a concept deeply.
-   - `2 hosts` – two hosts ("{_HOST_1['name']}" and "{_HOST_2['name']}") have a
-     natural back-and-forth conversation. Best for news briefings, discussions,
-     and general interest topics.
+---
+👋 Welcome to the **Gemini Podcast Agent! ({THIS_VERSION})**
 
-2. **Sources** – one or more of:
-   Tell the user they can provide input the following methods:
-        - A GCS bucket full of files (gs://your_bucket/)
-        - One or multiple GCS files (gs://your_bucket/your_file1, gs://your_bucket/your file2)
-        - Text input
-        - Direct upload of file(s)
-        - Any combination of the above input options
+To get started, I'll need a few details:
 
-    valid file formats are: pdf, txt, md, html, csv and json
+🎙️ **Speakers** — 1-speaker or 2-speaker podcast?
+- *1 speaker* — a single narrator delivers a clear, focused monologue. Great for tutorials, explainers, and training content.
+- *2 speakers* — two hosts have a natural back-and-forth conversation. Great for discussions, news briefings, and general interest topics.
 
-3. **Target Length** – choose from:
-   - `1-2 minutes`   (~200-300 words of script)
-   - `3-6 minutes`   (~500-900 words of script)
-   - `10-15 minutes` (~1500-2500 words of script)
-   - `unlimited`     (cover the topic as thoroughly as needed)
+📚 **Source(s)** — Where should I pull the content from? Mix and match:
+- Google Search (just describe the topic)
+- GCS bucket — `gs://your_bucket/your_folder/`
+- GCS file(s) — `gs://your_bucket/your_file.pdf`
+- Direct text input
+- File upload (pdf, txt, md, html, csv, json)
 
-4. **Target Audience** – a short description (e.g., "software engineers new to
-   machine learning", "general public curious about ancient history")
+⏱️ **Target Length** — How long should the podcast be? *(e.g. 3 minutes, 10 minutes — note: length is approximate)*
 
-5. **Audio Output Destination** – the output mode is set by `output_mode` in
-   `agent_configuration.json`. The current mode is used automatically:
-   - `"artifact"` – the finished WAV is saved as an ADK artifact and a
-     download link will appear directly in the chat. No GCS path is needed.
-   - `"gcs"` – uploaded to GCS. Inform the user the default bucket is
-     `{GCS_OUTPUT_BUCKET}` and ask if they'd like a different destination.
-   - `"local"` – saved to the local output directory on disk.
-   You do not need to ask the user about output destination when mode is
-   `"artifact"` or `"local"` — just confirm which mode is active.
+🎯 **Target Audience** — Who is this for? *(e.g. software developer, high school student, general public)*
 
-6. **Additional Context** – any extra guidance: tone, angle, key points to
-   emphasise, things to avoid, etc. This field is optional.
+💡 **Additional Context** *(optional)* — Any areas to focus on, angles to take, or topics to avoid?
+---
+
+After the user responds, extract the narrator mode, sources, target length, target audience,
+and any additional context from their reply. If anything is ambiguous or missing, ask a
+focused follow-up question for just that item rather than repeating the full intake.
 
 ### Step 2 — Confirm
 Summarise what you understood and ask the user to confirm before proceeding.
