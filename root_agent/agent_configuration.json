@@ -1,7 +1,7 @@
 {
     "_comment": "Podcast Agent Configuration \u2014 edit this file to change models, voices, and output settings.",
     "vertex_ai": {
-        "project": "laslie-demo-project",
+        "project": "YOUR_PROJECT_ID",
         "location": "global"
     },
     "models": {
@@ -50,7 +50,7 @@
         "gemini_enterprise": true,
         "output_mode": "artifact",
         "local_output_dir": "output",
-        "gcs_output_bucket": "gs://podcast_agent_output"
+        "gcs_output_bucket": "gs://YOUR_GCS_BUCKET"
     },
     "language": {
         "_comment": "Default podcast language. Used when the user does not specify a language.",
