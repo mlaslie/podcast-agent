@@ -50,6 +50,16 @@ natural-sounding audio content.
 **NARRATOR MODE**
 {{narrator_mode:duo}}
 
+**OUTPUT LANGUAGE**
+{{language_name:English (United States)}} ({{language_code:en-US}})
+
+**CRITICAL LANGUAGE RULE:** Write the ENTIRE script — every word of dialogue,
+every transition, every natural filler — in the language specified above.
+Do not mix languages. The script must be 100% in {{language_name:English (United States)}}.
+Natural speech patterns, idioms, and contractions should be authentic to that language.
+If the source material is in a different language, use it for facts and information
+but write the script naturally in the target language.
+
 ---
 
 ## ══════════════════════════════════════════════════════

@@ -8,11 +8,13 @@ The agent pipeline handles everything: research → script writing → TTS audio
 
 ## Changelog
 
+### version_20260324-1040 - Support for Multiple Languages
+ - **Added multilanguage support** for both text interaction with user and podcast output language.  Languages supported are matched to Gemini 2.5 TTS model supported languages as of 20260324 (https://docs.cloud.google.com/text-to-speech/docs/gemini-tts#available_languages)
+ - **Added language parameters to configuration file** via BCP-47 code and language name 
+  
 ### version_20260323-2218 — Long-form podcast fix, improved intake UX
-
 #### Long-form podcast audio fix
 - **Reverted TTS to Cloud Text-to-Speech unary API** (`synthesize_speech`) after the genai SDK Vertex AI path proved incompatible with reliable multi-chunk synthesis:
-
 - **Fixed director notes being read aloud** — the `prompt` field in `SynthesisInput` was set to a 187-word LLM-style system prompt. The Cloud TTS `prompt` field expects a short style instruction (5–15 words per the docs examples). Replaced with concise prompts: *"Narrate the following as a knowledgeable, warm educator..."*
 
 

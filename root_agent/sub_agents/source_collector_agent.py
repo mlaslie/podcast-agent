@@ -312,6 +312,13 @@ search_agent = Agent(
     "recent", "latest"). Always anchor search queries to real calendar dates
     and never use training data for time-sensitive topics.
 
+    ## Language
+    The research request will specify a target language for the podcast.
+    Conduct your searches in that target language wherever possible — use
+    search queries written in the target language so results are in the
+    correct language and cultural context. For example, if the target
+    language is French, search in French. If it is English, search in English.
+
     ## Your Process
     1. Analyse the research request. Identify any time references and convert
        them to explicit date ranges based on today's date:
@@ -364,6 +371,12 @@ source_collector_agent = Agent(
     context explicitly when invoking the search_agent tool so it can
     construct correctly date-bounded search queries.
 
+    ## Language Context
+    The target podcast language is: {{language_name:English (United States)}}
+    ({{language_code:en-US}}). Pass this to the search_agent so it runs
+    queries in the correct language. If source documents are in a different
+    language, still use them — the script writer will handle translation.
+
     Supported file types in GCS and uploads: .pdf, .txt, .md, .html, .csv, .json.
     Any other file types in a folder will be automatically skipped.
 
@@ -392,10 +405,12 @@ source_collector_agent = Agent(
 
     When the request includes free-form text topics:
       - Pass the full topic to the search_agent tool INCLUDING any time
-        references and today's date ({_TODAY_STR}) so the search agent
-        can construct correctly date-bounded queries.
+        references, today's date ({_TODAY_STR}), AND the target language
+        so the search agent can construct correctly date-bounded queries
+        in the right language.
         Example: instead of passing "top AI news last week", pass
-        "top AI news from the week of [dates]. Today is {_TODAY_STR}."
+        "top AI news from the week of [dates]. Today is {_TODAY_STR}.
+        Target language: {{language_name:English (United States)}}."
       - Run the search_agent at least twice for time-sensitive topics:
         once for the broad topic and once for specific stories or follow-ups.
       - Produce a comprehensive and verbose overview of the findings.

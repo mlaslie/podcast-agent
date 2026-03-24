@@ -1,63 +1,60 @@
 {
-    "_comment": "Podcast Agent Configuration — edit this file to change models, voices, and output settings.",
-
+    "_comment": "Podcast Agent Configuration \u2014 edit this file to change models, voices, and output settings.",
     "vertex_ai": {
-        "project":  "YOUR_GCP_PROJECT_ID",
+        "project": "laslie-demo-project",
         "location": "global"
     },
-
     "models": {
-        "orchestrator":     "gemini-3.1-flash-lite-preview",
+        "orchestrator": "gemini-3.1-flash-lite-preview",
         "source_collector": "gemini-3.1-flash-lite-preview",
-        "search_agent":     "gemini-3.1-flash-lite-preview",
-        "script_writer":    "gemini-3-flash-preview",
-        "audio_producer":   "gemini-3.1-flash-lite-preview",
-        "tts":              "gemini-2.5-flash-preview-tts",
-        "image":            "gemini-3.1-flash-image-preview"
+        "search_agent": "gemini-3.1-flash-lite-preview",
+        "script_writer": "gemini-3-flash-preview",
+        "audio_producer": "gemini-3.1-flash-lite-preview",
+        "tts": "gemini-2.5-flash-preview-tts",
+        "image": "gemini-3.1-flash-image-preview"
     },
-
     "hosts": {
         "host_1": {
-            "name":        "Alex",
-            "voice":       "Umbriel",
+            "name": "Alex",
+            "voice": "Umbriel",
             "description": "energetic and curious, often asks clarifying questions"
         },
         "host_2": {
-            "name":        "Jordan",
-            "voice":       "Charon",
+            "name": "Jordan",
+            "voice": "Charon",
             "description": "knowledgeable and measured, provides depth and context"
         }
     },
-
     "solo_host": {
-        "name":        "Alex",
-        "voice":       "Enceladus",
+        "name": "Alex",
+        "voice": "Umbriel",
         "description": "clear, authoritative, and engaging educator who explains concepts step by step"
     },
-
     "audio": {
-        "sample_rate":        24000,
-        "channels":           1,
-        "sample_width":       2,
-        "tts_max_chars":      100000,
+        "sample_rate": 24000,
+        "channels": 1,
+        "sample_width": 2,
+        "tts_max_chars": 100000,
         "chunk_target_words": 600
     },
-
     "podcast": {
-        "show_name":    "The Briefing",
-        "mp3_bitrate":  128
+        "show_name": "The Briefing",
+        "mp3_bitrate": 128
     },
-
     "album_art": {
-        "enabled":        true,
-        "image_size":     "1K",
-        "aspect_ratio":   "1:1"
+        "enabled": true,
+        "image_size": "1K",
+        "aspect_ratio": "1:1"
     },
-
     "output": {
-        "gemini_enterprise":  true,
-        "output_mode":        "artifact",
-        "local_output_dir":   "output",
-        "gcs_output_bucket":  "gs://YOUR_GCS_BUCKET"
+        "gemini_enterprise": true,
+        "output_mode": "artifact",
+        "local_output_dir": "output",
+        "gcs_output_bucket": "gs://podcast_agent_output"
+    },
+    "language": {
+        "_comment": "Default podcast language. Used when the user does not specify a language.",
+        "code": "en-US",
+        "name": "English (United States)"
     }
 }

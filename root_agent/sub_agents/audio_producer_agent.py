@@ -188,7 +188,7 @@ def _parse_script_to_turns(
         re.MULTILINE,
     )
 
-    turns: list[texttospeech.MultiSpeakerMarkup.Turn] = []
+    turns: list[texttospeech.MultiSpeakerMarkup.Turn] =[]
     for m in turn_pattern.finditer(script):
         speaker, text = m.group(1), m.group(2).strip()
         if not text:
@@ -220,7 +220,7 @@ def _parse_script_to_paragraphs(script: str) -> list[str]:
     stripping the leading speaker label (e.g. "Alex: ").
     """
     label = re.compile(r"^" + re.escape(SOLO_HOST["name"]) + r":\s*", re.MULTILINE)
-    paragraphs = []
+    paragraphs =[]
     for line in script.splitlines():
         line = line.strip()
         if not line:
@@ -252,7 +252,7 @@ def _chunk_turns(
     if total <= target_words:
         return [turns]
 
-    chunks, current, count = [], [], 0
+    chunks, current, count = [],[], 0
     for turn in turns:
         tw = len(turn.text.split())
         if count + tw > target_words and current:
@@ -281,7 +281,7 @@ def _chunk_paragraphs(
     if total <= target_words:
         return ["\n\n".join(paragraphs)]
 
-    chunks, current, count = [], [], 0
+    chunks, current, count = [],[], 0
     for para in paragraphs:
         pw = len(para.split())
         if count + pw > target_words and current:
@@ -419,7 +419,7 @@ def _build_mp3_bytes(
     encoder.set_channels(AUDIO_CHANNELS)
     encoder.set_quality(2)
 
-    mp3_chunks = []
+    mp3_chunks =[]
     chunk_size  = AUDIO_SAMPLE_RATE * AUDIO_SAMPLE_WIDTH * 10   # 10-second slices
     for offset in range(0, len(pcm_data), chunk_size):
         mp3_chunks.append(encoder.encode(pcm_data[offset:offset + chunk_size]))
@@ -458,6 +458,7 @@ async def generate_podcast_audio(
     script: str,
     podcast_title: str,
     narrator_mode: str = "duo",
+    language_code: str = "en-US",
     topic_summary: str = "",
     key_themes: str = "",
     target_audience: str = "",
@@ -494,10 +495,10 @@ async def generate_podcast_audio(
         narrator_mode = (narrator_mode or "duo").lower().strip()
         is_solo       = narrator_mode == "solo"
 
-        logger.info("generate_podcast_audio: narrator_mode=%s title='%s'",
-                    narrator_mode, podcast_title)
+        logger.info("generate_podcast_audio: narrator_mode=%s language=%s title='%s'",
+                    narrator_mode, language_code, podcast_title)
 
-        all_pcm: list[bytes] = []
+        all_pcm: list[bytes] =[]
         chunks_processed = 0
 
         audio_config = texttospeech.AudioConfig(
@@ -514,7 +515,7 @@ async def generate_podcast_audio(
                         len(text_chunks), podcast_title)
 
             voice = texttospeech.VoiceSelectionParams(
-                language_code="en-US",
+                language_code=language_code,
                 name=SOLO_HOST["voice"],
                 model_name=_TTS_API_MODEL,
             )
@@ -547,7 +548,7 @@ async def generate_podcast_audio(
                         len(turn_chunks), podcast_title)
 
             voice = texttospeech.VoiceSelectionParams(
-                language_code="en-US",
+                language_code=language_code,
                 model_name=_TTS_API_MODEL,
                 multi_speaker_voice_config=texttospeech.MultiSpeakerVoiceConfig(
                     speaker_voice_configs=[
@@ -773,35 +774,30 @@ with dynamically generated album art.
 3. Call `generate_podcast_audio` with:
    - `script`, `podcast_title`, `topic_summary`, `key_themes`, `target_audience`
    - `narrator_mode` — pass through exactly as received (`"solo"` or `"duo"`)
+   - `language_code` — pass through from state (`{language_code:en-US}`)
    - `style_guidance` — optional tone notes
    - For "gcs" mode only: `write_to_gcs=True` and optionally `gcs_output_bucket`
 
 ## Your Output
-After calling the tool, return in this exact markdown format:
+After calling the tool, dynamically translate the following response template into **{language_name:English (United States)}** and return it:
 
 ## Title: [Episode title] ([duration])
 -------------------------------------------------------------------------
-## Album Art:
-[If `art_artifact_saved` is True: "Episode cover art was generated and will appear below."]
+## Album Art:[If `art_artifact_saved` is True: "Episode cover art was generated and will appear below."]
 
 ## Script:
 [The podcast script]
 
 -------------------------------------------------------------------------
 
-## Podcast:
-[If `wav_artifact_saved` is True AND `mp3_gcs_url` is non-empty:
+## Podcast:[If `wav_artifact_saved` is True AND `mp3_gcs_url` is non-empty:
   "Your podcast is ready:
    - 🎧 **Listen now** — the WAV player will appear in the chat above.
-   - 📥 **Download MP3** (includes album art and title) — [mp3_gcs_url]"]
-
-[If `artifact_saved` is True AND `wav_artifact_saved` is False:
-  "Your podcast MP3 with embedded album art is ready — click the download button to save it."]
-
-[If `output_url` is non-empty and no artifacts:
+   - 📥 **Download MP3** (includes album art and title) — [mp3_gcs_url]"][If `artifact_saved` is True AND `wav_artifact_saved` is False:
+  "Your podcast MP3 with embedded album art is ready — click the download button to save it."][If `output_url` is non-empty and no artifacts:
   Provide it as a clickable GCS URL.]
 
-If the tool returns an error, report it clearly and DO NOT retry — stop and explain the issue to the user.
+If the tool returns an error, report it clearly in {language_name:English (United States)} and DO NOT retry — stop and explain the issue to the user.
 """,
     tools=[generate_podcast_audio],
     output_key="final_output",
