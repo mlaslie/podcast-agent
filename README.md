@@ -8,7 +8,7 @@ The agent pipeline handles everything: research → script writing → TTS audio
 
 ## Changelog
 
-### version_20260326-2218 — Long-form podcast fix, improved intake UX
+### version_20260323-2218 — Long-form podcast fix, improved intake UX
 
 #### Long-form podcast audio fix
 - **Reverted TTS to Cloud Text-to-Speech unary API** (`synthesize_speech`) after the genai SDK Vertex AI path proved incompatible with reliable multi-chunk synthesis:
